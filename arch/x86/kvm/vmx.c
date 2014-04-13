@@ -5701,13 +5701,21 @@ static int handle_preemption_timer_exit(struct kvm_vcpu *vcpu)
 
 static inline void set_rdtsc_return_value(struct kvm_vcpu *vcpu, u64 tsc_value)
 {
+#ifdef CONFIG_X86_64
 	vcpu->arch.regs[VCPU_REGS_RAX] >>= 32;
 	vcpu->arch.regs[VCPU_REGS_RAX] <<= 32;
 	vcpu->arch.regs[VCPU_REGS_RAX] |= tsc_value & -1u;
+#else
+	vcpu->arch.regs[VCPU_REGS_RAX] = tsc_value & -1u;
+#endif
 
+#ifdef CONFIG_X86_64
 	vcpu->arch.regs[VCPU_REGS_RDX] >>= 32;
 	vcpu->arch.regs[VCPU_REGS_RDX] <<= 32;
 	vcpu->arch.regs[VCPU_REGS_RDX] |= (tsc_value >> 32) & -1u;
+#else
+	vcpu->arch.regs[VCPU_REGS_RDX] = (tsc_value >> 32) & -1u;
+#endif
 }
 
 static inline void set_rdtscp_aux_return_value(struct kvm_vcpu *vcpu)
@@ -5717,9 +5725,13 @@ static inline void set_rdtscp_aux_return_value(struct kvm_vcpu *vcpu)
 	u64 tsc_aux = 0;
 	vmx_get_msr(vcpu, MSR_TSC_AUX, &tsc_aux);
 	
+#ifdef CONFIG_X86_64
 	vcpu->arch.regs[VCPU_REGS_RCX] >>= 32;
 	vcpu->arch.regs[VCPU_REGS_RCX] <<= 32;
 	vcpu->arch.regs[VCPU_REGS_RCX] |= tsc_aux & -1u;
+#else
+	vcpu->arch.regs[VCPU_REGS_RCX] = tsc_aux & -1u;
+#endif
 
 	debug->last_read_tsc_aux = tsc_aux;
 	debug->tscp_counter++;
