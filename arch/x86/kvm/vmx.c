@@ -21,6 +21,7 @@
 #include "cpuid.h"
 
 #include <linux/kvm_host.h>
+#include <linux/kvm_preemption_data.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -45,6 +46,10 @@
 #include <asm/kexec.h>
 
 #include "trace.h"
+
+#ifndef DEBUGCTLMSR_FREEZE_PERFMON_ON_PMI
+#define DEBUGCTLMSR_FREEZE_PERFMON_ON_PMI (1UL << 12)
+#endif
 
 #define __ex(x) __kvm_handle_fault_on_reboot(x)
 #define __ex_clear(x, reg) \
@@ -426,11 +431,10 @@ struct vcpu_vmx {
 	struct loaded_vmcs    vmcs01;
 	struct loaded_vmcs   *loaded_vmcs;
 	bool                  __launched; /* temporary, used in vmx_vcpu_run */
-	struct msr_autoload {
+	struct msr_exchange_data {
 		unsigned nr;
-		struct vmx_msr_entry guest[NR_AUTOLOAD_MSRS];
-		struct vmx_msr_entry host[NR_AUTOLOAD_MSRS];
-	} msr_autoload;
+		struct vmx_msr_entry data[NR_AUTOLOAD_MSRS];		
+	} guest_store, guest_load, host_load;
 	struct {
 		int           loaded;
 		u16           fs_sel, gs_sel, ldt_sel;
@@ -748,6 +752,16 @@ static unsigned long *vmx_vmwrite_bitmap;
 static bool cpu_has_load_ia32_efer;
 static bool cpu_has_load_perf_global_ctrl;
 
+struct cpuid_value {
+	u32 eax, ebx, ecx, edx;
+};
+
+static struct cpu_perf_capabilities {
+	union cpuid10_eax cpuid10_eax;
+	union cpuid10_edx cpuid10_edx;
+} cpu_perf_capabilities;
+
+
 static DECLARE_BITMAP(vmx_vpid_bitmap, VMX_NR_VPIDS);
 static DEFINE_SPINLOCK(vmx_vpid_lock);
 
@@ -756,8 +770,10 @@ static struct vmcs_config {
 	int order;
 	u32 revision_id;
 	u32 pin_based_exec_ctrl;
+	u32 opt_pin_based_exec_ctrl;
 	u32 cpu_based_exec_ctrl;
 	u32 cpu_based_2nd_exec_ctrl;
+	u32 opt_cpu_based_2nd_exec_ctrl;
 	u32 vmexit_ctrl;
 	u32 vmentry_ctrl;
 } vmcs_config;
@@ -1005,6 +1021,11 @@ static inline bool cpu_has_virtual_nmis(void)
 	return vmcs_config.pin_based_exec_ctrl & PIN_BASED_VIRTUAL_NMIS;
 }
 
+static inline bool cpu_has_vmx_preemption_timer(void)
+{
+	return vmcs_config.opt_pin_based_exec_ctrl & PIN_BASED_VMX_PREEMPTION_TIMER;
+}
+
 static inline bool cpu_has_vmx_wbinvd_exit(void)
 {
 	return vmcs_config.cpu_based_2nd_exec_ctrl &
@@ -1021,6 +1042,13 @@ static inline bool cpu_has_vmx_shadow_vmcs(void)
 
 	return vmcs_config.cpu_based_2nd_exec_ctrl &
 		SECONDARY_EXEC_SHADOW_VMCS;
+}
+
+static inline int cpu_vmx_preemption_timer_rate(void)
+{
+	u64 vmx_msr;
+	rdmsrl(MSR_IA32_VMX_MISC, vmx_msr);
+	return (int)vmx_msr & VMX_MISC_PREEMPTION_TIMER_RATE_MASK;
 }
 
 static inline bool report_flexpriority(void)
@@ -1050,6 +1078,26 @@ static inline bool is_exception(u32 intr_info)
 {
 	return (intr_info & (INTR_INFO_INTR_TYPE_MASK | INTR_INFO_VALID_MASK))
 		== (INTR_TYPE_HARD_EXCEPTION | INTR_INFO_VALID_MASK);
+}
+
+static inline unsigned cpu_num_general_counters(void)
+{
+	return cpu_perf_capabilities.cpuid10_eax.split.num_counters;
+}
+
+static inline unsigned cpu_general_counters_bit_width(void)
+{
+	return cpu_perf_capabilities.cpuid10_eax.split.bit_width;
+}
+
+static inline unsigned cpu_num_fixed_counters(void)
+{
+	return cpu_perf_capabilities.cpuid10_edx.split.num_counters_fixed;
+}
+
+static inline unsigned cpu_fixed_counters_bit_width(void)
+{
+	return cpu_perf_capabilities.cpuid10_edx.split.bit_width_fixed;
 }
 
 static void nested_vmx_vmexit(struct kvm_vcpu *vcpu);
@@ -1413,11 +1461,116 @@ static void clear_atomic_switch_msr_special(unsigned long entry,
 	vmcs_clear_bits(VM_EXIT_CONTROLS, exit);
 }
 
-static void clear_atomic_switch_msr(struct vcpu_vmx *vmx, unsigned msr)
+static struct vmx_msr_entry *find_msr_exchange_entry(struct msr_exchange_data *m, unsigned msr)
 {
 	unsigned i;
-	struct msr_autoload *m = &vmx->msr_autoload;
 
+	for (i = 0; i < m->nr; ++i)
+		if (m->data[i].index == msr)
+			return &m->data[i];
+
+	return NULL;
+}
+
+static u64 get_msr_exchange_value(struct msr_exchange_data *m, unsigned msr, u64 default_value)
+{
+	struct vmx_msr_entry *entry = find_msr_exchange_entry(m, msr);
+
+	if (entry == NULL)
+		return default_value;
+
+	return entry->value;
+}
+
+static u64 read_guest_store_msr(struct vcpu_vmx *vmx, unsigned msr, u64 default_value)
+{
+	return get_msr_exchange_value(&vmx->guest_store, msr, default_value);
+}
+
+static void clear_msr_exchange_data(struct msr_exchange_data *m, unsigned msr,
+				    unsigned vmcs_count_flag)
+{
+	unsigned i;
+
+	for (i = 0; i < m->nr; ++i)
+		if (m->data[i].index == msr)
+			break;
+
+	if (i == m->nr)
+		return;
+
+	--m->nr;
+	m->data[i] = m->data[m->nr];
+	vmcs_write32(vmcs_count_flag, m->nr);
+}
+
+static void add_msr_exchange_slot(struct msr_exchange_data *m, unsigned msr,
+				  unsigned vmcs_count_flag)
+{
+	unsigned i;
+
+	for (i = 0; i < m->nr; ++i)
+		if (m->data[i].index == msr)
+			return;
+
+	if (i == NR_AUTOLOAD_MSRS) {
+		printk_once(KERN_WARNING"Not enough mst switch entries. "
+				"Can't add msr %x\n", msr);
+		return;
+	} else if (i == m->nr) {
+		++m->nr;
+		vmcs_write32(vmcs_count_flag, m->nr);
+	}
+
+	m->data[i].index = msr;
+	m->data[i].value = 0;
+}
+
+static void add_msr_exchange_data(struct msr_exchange_data *m, unsigned msr, u64 value,
+				  unsigned vmcs_count_flag)
+{
+	unsigned i;
+
+	for (i = 0; i < m->nr; ++i)
+		if (m->data[i].index == msr)
+			break;
+
+	if (i == NR_AUTOLOAD_MSRS) {
+		printk_once(KERN_WARNING"Not enough mst switch entries. "
+				"Can't add msr %x\n", msr);
+		return;
+	} else if (i == m->nr) {
+		++m->nr;
+		vmcs_write32(vmcs_count_flag, m->nr);
+	}
+
+	m->data[i].index = msr;
+	m->data[i].value = value;
+}
+
+static inline void clear_guest_store_msr_generic(struct vcpu_vmx *vmx, unsigned msr)
+{
+	clear_msr_exchange_data(&vmx->guest_store, msr, VM_EXIT_MSR_STORE_COUNT);
+}
+
+static inline void clear_guest_load_msr_generic(struct vcpu_vmx *vmx, unsigned msr)
+{
+	clear_msr_exchange_data(&vmx->guest_load, msr, VM_ENTRY_MSR_LOAD_COUNT);
+}
+
+static void clear_host_load_msr_generic(struct vcpu_vmx *vmx, unsigned msr)
+{
+	clear_msr_exchange_data(&vmx->host_load, msr, VM_EXIT_MSR_LOAD_COUNT);
+}
+
+static void clear_atomic_switch_msr_generic(struct vcpu_vmx *vmx, unsigned msr)
+{
+	clear_guest_load_msr_generic(vmx, msr);
+	clear_host_load_msr_generic(vmx, msr);
+}
+
+static void clear_atomic_switch_msr(struct vcpu_vmx *vmx, unsigned msr)
+{
 	switch (msr) {
 	case MSR_EFER:
 		if (cpu_has_load_ia32_efer) {
@@ -1436,17 +1589,7 @@ static void clear_atomic_switch_msr(struct vcpu_vmx *vmx, unsigned msr)
 		break;
 	}
 
-	for (i = 0; i < m->nr; ++i)
-		if (m->guest[i].index == msr)
-			break;
-
-	if (i == m->nr)
-		return;
-	--m->nr;
-	m->guest[i] = m->guest[m->nr];
-	m->host[i] = m->host[m->nr];
-	vmcs_write32(VM_ENTRY_MSR_LOAD_COUNT, m->nr);
-	vmcs_write32(VM_EXIT_MSR_LOAD_COUNT, m->nr);
+	clear_atomic_switch_msr_generic(vmx, msr);
 }
 
 static void add_atomic_switch_msr_special(unsigned long entry,
@@ -1459,12 +1602,36 @@ static void add_atomic_switch_msr_special(unsigned long entry,
 	vmcs_set_bits(VM_EXIT_CONTROLS, exit);
 }
 
+static void add_guest_store_msr_generic(struct vcpu_vmx *vmx, unsigned msr)
+{
+	add_msr_exchange_slot(&vmx->guest_store, msr, VM_EXIT_MSR_STORE_COUNT);
+}
+
+static void set_guest_store_msr_generic(struct vcpu_vmx *vmx, unsigned msr, u64 value)
+{
+	add_msr_exchange_data(&vmx->guest_store, msr, value, VM_EXIT_MSR_STORE_COUNT);
+}
+
+static void add_guest_load_msr_generic(struct vcpu_vmx *vmx, unsigned msr, u64 value)
+{
+	add_msr_exchange_data(&vmx->guest_load, msr, value, VM_ENTRY_MSR_LOAD_COUNT);
+}
+
+static void add_host_load_msr_generic(struct vcpu_vmx *vmx, unsigned msr, u64 value)
+{
+	add_msr_exchange_data(&vmx->host_load, msr, value, VM_EXIT_MSR_LOAD_COUNT);
+}
+
+static void add_atomic_switch_msr_generic(struct vcpu_vmx *vmx, unsigned msr,
+					  u64 guest_val, u64 host_val)
+{
+	add_guest_load_msr_generic(vmx, msr, guest_val);
+	add_host_load_msr_generic(vmx, msr, host_val);
+}
+
 static void add_atomic_switch_msr(struct vcpu_vmx *vmx, unsigned msr,
 				  u64 guest_val, u64 host_val)
 {
-	unsigned i;
-	struct msr_autoload *m = &vmx->msr_autoload;
-
 	switch (msr) {
 	case MSR_EFER:
 		if (cpu_has_load_ia32_efer) {
@@ -1485,28 +1652,13 @@ static void add_atomic_switch_msr(struct vcpu_vmx *vmx, unsigned msr,
 					HOST_IA32_PERF_GLOBAL_CTRL,
 					guest_val, host_val);
 			return;
+		} else {
+			printk_once(KERN_WARNING "No GUEST_IA32_PERF_GLOBAL_CTRL\n");
 		}
 		break;
 	}
 
-	for (i = 0; i < m->nr; ++i)
-		if (m->guest[i].index == msr)
-			break;
-
-	if (i == NR_AUTOLOAD_MSRS) {
-		printk_once(KERN_WARNING"Not enough mst switch entries. "
-				"Can't add msr %x\n", msr);
-		return;
-	} else if (i == m->nr) {
-		++m->nr;
-		vmcs_write32(VM_ENTRY_MSR_LOAD_COUNT, m->nr);
-		vmcs_write32(VM_EXIT_MSR_LOAD_COUNT, m->nr);
-	}
-
-	m->guest[i].index = msr;
-	m->guest[i].value = guest_val;
-	m->host[i].index = msr;
-	m->host[i].value = host_val;
+	add_atomic_switch_msr_generic(vmx, msr, guest_val, host_val);
 }
 
 static void reload_tss(void)
@@ -2685,13 +2837,25 @@ static __init bool allow_1_setting(u32 msr, u32 ctl)
 	return vmx_msr_high & ctl;
 }
 
+static __init void init_cpu_perf_capabilities(void)
+{
+	u32 unused;
+	cpuid(0xa,
+	      &cpu_perf_capabilities.cpuid10_eax.full,
+	      &unused, &unused,
+	      &cpu_perf_capabilities.cpuid10_edx.full);
+}
+
+
 static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
 {
 	u32 vmx_msr_low, vmx_msr_high;
 	u32 min, opt, min2, opt2;
 	u32 _pin_based_exec_control = 0;
+	u32 _opt_pin_based_exec_control = 0;
 	u32 _cpu_based_exec_control = 0;
 	u32 _cpu_based_2nd_exec_control = 0;
+	u32 _opt_cpu_based_2nd_exec_control = 0;
 	u32 _vmexit_control = 0;
 	u32 _vmentry_control = 0;
 
@@ -2708,7 +2872,8 @@ static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
 	      CPU_BASED_MWAIT_EXITING |
 	      CPU_BASED_MONITOR_EXITING |
 	      CPU_BASED_INVLPG_EXITING |
-	      CPU_BASED_RDPMC_EXITING;
+	      CPU_BASED_RDPMC_EXITING |
+		CPU_BASED_RDTSC_EXITING;
 
 	opt = CPU_BASED_TPR_SHADOW |
 	      CPU_BASED_USE_MSR_BITMAPS |
@@ -2738,6 +2903,12 @@ static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
 		if (adjust_vmx_controls(min2, opt2,
 					MSR_IA32_VMX_PROCBASED_CTLS2,
 					&_cpu_based_2nd_exec_control) < 0)
+			return -EIO;
+		min2 = 0;
+		opt2 = SECONDARY_EXEC_RDTSCP;
+		if (adjust_vmx_controls(min2, opt2,
+					MSR_IA32_VMX_PROCBASED_CTLS2,
+					&_opt_cpu_based_2nd_exec_control) < 0)
 			return -EIO;
 	}
 #ifndef CONFIG_X86_64
@@ -2778,6 +2949,12 @@ static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
 				&_pin_based_exec_control) < 0)
 		return -EIO;
 
+	min = 0;
+	opt = PIN_BASED_VMX_PREEMPTION_TIMER;
+	if (adjust_vmx_controls(min, opt, MSR_IA32_VMX_PINBASED_CTLS,
+				&_opt_pin_based_exec_control) < 0)
+		return -EIO;
+
 	if (!(_cpu_based_2nd_exec_control &
 		SECONDARY_EXEC_VIRTUAL_INTR_DELIVERY) ||
 		!(_vmexit_control & VM_EXIT_ACK_INTR_ON_EXIT))
@@ -2810,8 +2987,10 @@ static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
 	vmcs_conf->revision_id = vmx_msr_low;
 
 	vmcs_conf->pin_based_exec_ctrl = _pin_based_exec_control;
+	vmcs_conf->opt_pin_based_exec_ctrl = _opt_pin_based_exec_control;
 	vmcs_conf->cpu_based_exec_ctrl = _cpu_based_exec_control;
 	vmcs_conf->cpu_based_2nd_exec_ctrl = _cpu_based_2nd_exec_control;
+	vmcs_conf->opt_cpu_based_2nd_exec_ctrl = _opt_cpu_based_2nd_exec_control;
 	vmcs_conf->vmexit_ctrl         = _vmexit_control;
 	vmcs_conf->vmentry_ctrl        = _vmentry_control;
 
@@ -2826,6 +3005,8 @@ static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
 				VM_ENTRY_LOAD_IA32_PERF_GLOBAL_CTRL)
 		&& allow_1_setting(MSR_IA32_VMX_EXIT_CTLS,
 				   VM_EXIT_LOAD_IA32_PERF_GLOBAL_CTRL);
+
+	init_cpu_perf_capabilities();
 
 	/*
 	 * Some cpus support VM_ENTRY_(LOAD|SAVE)_IA32_PERF_GLOBAL_CTRL
@@ -2937,6 +3118,9 @@ static __init int hardware_setup(void)
 		enable_vpid = 0;
 	if (!cpu_has_vmx_shadow_vmcs())
 		enable_shadow_vmcs = 0;
+
+	kvm_has_preemption_timer = cpu_has_vmx_preemption_timer();
+	kvm_preemption_timer_rate = kvm_has_preemption_timer ? cpu_vmx_preemption_timer_rate() : 0;
 
 	if (!cpu_has_vmx_ept() ||
 	    !cpu_has_vmx_ept_4levels()) {
@@ -4145,6 +4329,10 @@ static u32 vmx_pin_based_exec_ctrl(struct vcpu_vmx *vmx)
 {
 	u32 pin_based_exec_ctrl = vmcs_config.pin_based_exec_ctrl;
 
+	if (kvm_enable_preemption_timer(&vmx->vcpu))
+		pin_based_exec_ctrl |=
+			(vmcs_config.opt_pin_based_exec_ctrl & PIN_BASED_VMX_PREEMPTION_TIMER);
+
 	if (!vmx_vm_has_apicv(vmx->vcpu.kvm))
 		pin_based_exec_ctrl &= ~PIN_BASED_POSTED_INTR;
 	return pin_based_exec_ctrl;
@@ -4170,6 +4358,9 @@ static u32 vmx_exec_control(struct vcpu_vmx *vmx)
 static u32 vmx_secondary_exec_control(struct vcpu_vmx *vmx)
 {
 	u32 exec_control = vmcs_config.cpu_based_2nd_exec_ctrl;
+	if (kvm_preemption_on(vmx->vcpu.kvm))
+		exec_control |=
+			(vmcs_config.opt_cpu_based_2nd_exec_ctrl & SECONDARY_EXEC_RDTSCP);
 	if (!vm_need_virtualize_apic_accesses(vmx->vcpu.kvm))
 		exec_control &= ~SECONDARY_EXEC_VIRTUALIZE_APIC_ACCESSES;
 	if (vmx->vpid == 0)
@@ -4276,10 +4467,11 @@ static int vmx_vcpu_setup(struct vcpu_vmx *vmx)
 #endif
 
 	vmcs_write32(VM_EXIT_MSR_STORE_COUNT, 0);
+	vmcs_write64(VM_EXIT_MSR_STORE_ADDR, __pa(vmx->guest_store.data));
 	vmcs_write32(VM_EXIT_MSR_LOAD_COUNT, 0);
-	vmcs_write64(VM_EXIT_MSR_LOAD_ADDR, __pa(vmx->msr_autoload.host));
+	vmcs_write64(VM_EXIT_MSR_LOAD_ADDR, __pa(vmx->host_load.data));
 	vmcs_write32(VM_ENTRY_MSR_LOAD_COUNT, 0);
-	vmcs_write64(VM_ENTRY_MSR_LOAD_ADDR, __pa(vmx->msr_autoload.guest));
+	vmcs_write64(VM_ENTRY_MSR_LOAD_ADDR, __pa(vmx->guest_load.data));
 
 	if (vmcs_config.vmentry_ctrl & VM_ENTRY_LOAD_IA32_PAT) {
 		u32 msr_low, msr_high;
@@ -5499,6 +5691,81 @@ static int handle_invalid_op(struct kvm_vcpu *vcpu)
 	return 1;
 }
 
+static int handle_preemption_timer_exit(struct kvm_vcpu *vcpu)
+{
+	int handled = kvm_on_preemption_timer_exit(vcpu);
+	if (!handled)
+		vcpu->run->exit_reason = KVM_EXIT_PREEMPTION_TIMER;
+	return handled;
+}
+
+static inline void set_rdtsc_return_value(struct kvm_vcpu *vcpu, u64 tsc_value)
+{
+	vcpu->arch.regs[VCPU_REGS_RAX] >>= 32;
+	vcpu->arch.regs[VCPU_REGS_RAX] <<= 32;
+	vcpu->arch.regs[VCPU_REGS_RAX] |= tsc_value & -1u;
+
+	vcpu->arch.regs[VCPU_REGS_RDX] >>= 32;
+	vcpu->arch.regs[VCPU_REGS_RDX] <<= 32;
+	vcpu->arch.regs[VCPU_REGS_RDX] |= (tsc_value >> 32) & -1u;
+}
+
+static inline void set_rdtscp_aux_return_value(struct kvm_vcpu *vcpu)
+{
+	struct preemption_debug_data *debug = &vcpu->run->preemption_debug_data;
+
+	u64 tsc_aux = 0;
+	vmx_get_msr(vcpu, MSR_TSC_AUX, &tsc_aux);
+	
+	vcpu->arch.regs[VCPU_REGS_RCX] >>= 32;
+	vcpu->arch.regs[VCPU_REGS_RCX] <<= 32;
+	vcpu->arch.regs[VCPU_REGS_RCX] |= tsc_aux & -1u;
+
+	debug->last_read_tsc_aux = tsc_aux;
+	debug->tscp_counter++;
+}
+
+static int handle_rdtsc_with_preemption(struct kvm_vcpu *vcpu)
+{
+	u64 tsc_value;
+	bool do_record;
+	if (!kvm_preemption_retrieve_rdtsc_value(vcpu,
+						&tsc_value,
+						&do_record))
+		return 0;
+	set_rdtsc_return_value(vcpu, tsc_value);
+	skip_emulated_instruction(vcpu);
+	if (do_record)
+		kvm_record_tsc(vcpu, tsc_value);
+	return 1;
+}
+
+static int handle_rdtscp_with_preemption(struct kvm_vcpu *vcpu)
+{
+	u64 tsc_value;
+	bool do_record;
+	if (!kvm_preemption_retrieve_rdtsc_value(vcpu,
+						 &tsc_value,
+						 &do_record))
+		return 0;
+	set_rdtscp_aux_return_value(vcpu);
+	set_rdtsc_return_value(vcpu, tsc_value);
+	skip_emulated_instruction(vcpu);
+	if (do_record)
+		kvm_record_tsc(vcpu, tsc_value);
+	return 1;
+}
+
+static int handle_rdtsc(struct kvm_vcpu *vcpu)
+{
+	return handle_rdtsc_with_preemption(vcpu);
+}
+
+static int handle_rdtscp(struct kvm_vcpu *vcpu)
+{
+	return handle_rdtscp_with_preemption(vcpu);
+}
+
 /*
  * To run an L2 guest, we need a vmcs02 based on the L1-specified vmcs12.
  * We could reuse a single VMCS for all the L2 guests, but we also want the
@@ -6313,6 +6580,9 @@ static int (*const kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[EXIT_REASON_PAUSE_INSTRUCTION]       = handle_pause,
 	[EXIT_REASON_MWAIT_INSTRUCTION]	      = handle_invalid_op,
 	[EXIT_REASON_MONITOR_INSTRUCTION]     = handle_invalid_op,
+	[EXIT_REASON_PREEMPTION_TIMER]        = handle_preemption_timer_exit,
+	[EXIT_REASON_RDTSC]                   = handle_rdtsc,
+	[EXIT_REASON_RDTSCP]                  = handle_rdtscp,
 };
 
 static const int kvm_vmx_max_exit_handlers =
@@ -6554,6 +6824,8 @@ static bool nested_vmx_exit_handled(struct kvm_vcpu *vcpu)
 	case EXIT_REASON_MSR_WRITE:
 		return nested_vmx_exit_handled_msr(vcpu, vmcs12, exit_reason);
 	case EXIT_REASON_INVALID_STATE:
+		return 1;
+	case EXIT_REASON_MSR_LOADING:
 		return 1;
 	case EXIT_REASON_MWAIT_INSTRUCTION:
 		return nested_cpu_has(vmcs12, CPU_BASED_MWAIT_EXITING);
@@ -6980,6 +7252,191 @@ static void atomic_switch_perf_msrs(struct vcpu_vmx *vmx)
 					msrs[i].host);
 }
 
+static void add_guest_kept_msr(struct vcpu_vmx *vmx, unsigned msr, u64 initial_value)
+{
+	u64 current_value;
+
+	rdmsrl_safe(msr, &current_value);
+
+	switch (msr) {
+	case MSR_CORE_PERF_GLOBAL_CTRL:
+		add_atomic_switch_msr(vmx, msr, initial_value, current_value);
+		return;
+	}
+	add_guest_load_msr_generic(vmx, msr, read_guest_store_msr(vmx, msr, initial_value));
+	add_guest_store_msr_generic(vmx, msr);
+
+	add_host_load_msr_generic(vmx, msr, current_value);
+}
+
+static inline u64 expand_counter(u64 value, unsigned bit_width)
+{
+	u64 one = 1;
+	u64 all_ones = 0 - one;
+	if ((value & (one << (bit_width - 1))) != 0) {
+		value |= (all_ones << bit_width);
+	}
+	return value;
+}
+
+static inline u64 mask_counter(u64 value, unsigned bit_width)
+{
+	u64 one = 1;
+	return value & ((one << bit_width) - 1);
+}
+
+static inline u64 expand_fixed_counter(u64 value) {
+	return expand_counter(value, cpu_fixed_counters_bit_width());
+}
+
+static inline u64 mask_fixed_counter(u64 value) {
+	return mask_counter(value, cpu_fixed_counters_bit_width());
+}
+
+static inline u64 expand_general_counter(u64 value) {
+	return expand_counter(value, cpu_general_counters_bit_width());
+}
+
+static inline u64 mask_general_counter(u64 value) {
+	return mask_counter(value, cpu_general_counters_bit_width());
+}
+
+static inline unsigned retired_branch_counter_msr(void)
+{
+	return MSR_P6_PERFCTR0 + cpu_num_general_counters() - 1;
+}
+
+static inline unsigned retired_branch_counter_ctrl_msr(void)
+{
+	return MSR_P6_EVNTSEL0 + cpu_num_general_counters() - 1;
+}
+
+static u64 vmx_read_retired_branch_counter(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	return expand_general_counter(read_guest_store_msr(vmx, retired_branch_counter_msr(), 0));
+}
+
+static void vmx_set_retired_branch_counter(struct kvm_vcpu *vcpu, u64 value)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	set_guest_store_msr_generic(vmx, retired_branch_counter_msr(), mask_general_counter(value));
+}
+
+static u32 vmx_read_preemption_timer_value(struct kvm_vcpu *vcpu)
+{
+	return vmcs_read32(VMX_PREEMPTION_TIMER_VALUE);
+}
+
+static void vmx_write_preemption_timer_value(struct kvm_vcpu *vcpu, u32 value)
+{
+	vmcs_write32(VMX_PREEMPTION_TIMER_VALUE, value);
+}
+
+static u64 vmx_read_guest_program_counter(struct kvm_vcpu *vcpu)
+{
+	return kvm_register_read(vcpu, VCPU_REGS_RIP);
+}
+
+static u32 vmx_read_guest_ecx(struct kvm_vcpu *vcpu)
+{
+	return (u32)kvm_register_read(vcpu, VCPU_REGS_RCX);
+}
+
+static bool vmx_guest_halted(struct kvm_vcpu *vcpu) {
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	return vmx->exit_reason == EXIT_REASON_HLT;
+}
+
+static void prepare_guest_kept_msrs(struct vcpu_vmx *vmx)
+{
+	u64 one = 1;
+	u64 perf_global_ctrl_enable_last_ctr = one << (cpu_num_general_counters() - 1);
+
+	u64 perf_ctrl_enable_all_ring_levels = (one << 16) | (one << 17);
+	u64 perf_ctrl_enable = one << 22;
+	u64 perf_ctrl_apic_intr_enable = one << 20;
+	u64 perf_ctrl_branch_retired_event_select = 0xc4;
+	u64 perf_ctrl_branch_retired_umask = 0 << 8;
+
+	u64 perf_global_ctrl_msr_value;
+
+	add_guest_kept_msr(vmx, retired_branch_counter_msr(), 0);
+
+	perf_global_ctrl_msr_value = perf_global_ctrl_enable_last_ctr;
+	add_guest_kept_msr(vmx, MSR_CORE_PERF_GLOBAL_CTRL,
+			   perf_global_ctrl_msr_value);
+	/*
+	 * This causes the machine to get stuck:
+	 * add_guest_kept_msr(vmx, MSR_CORE_PERF_GLOBAL_STATUS, 0);
+	 */
+	add_guest_kept_msr(vmx, retired_branch_counter_ctrl_msr(),
+			   perf_ctrl_enable_all_ring_levels |
+			   perf_ctrl_enable |
+			   perf_ctrl_apic_intr_enable |
+			   perf_ctrl_branch_retired_event_select |
+			   perf_ctrl_branch_retired_umask);
+}
+
+void vmx_on_preemption(struct kvm_vcpu *vcpu)
+{
+	/*
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	printk(KERN_ERR "kvm %d: [%d] preempted\n", vcpu->cpu, vmx->exit_reason);
+	*/
+}
+
+static void vmx_setup_preemption_timer(struct kvm_vcpu *vcpu, bool on)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	bool rdtscp_enabled;
+	if (kvm_has_preemption_timer) {
+		rdtscp_enabled = cpu_has_secondary_exec_ctrls() && vmx->rdtscp_enabled;
+		if (on) {
+			vmcs_set_bits(PIN_BASED_VM_EXEC_CONTROL, PIN_BASED_VMX_PREEMPTION_TIMER);
+			if (rdtscp_enabled)
+				vmcs_set_bits(SECONDARY_VM_EXEC_CONTROL, SECONDARY_EXEC_RDTSCP);
+		} else {
+			vmcs_clear_bits(PIN_BASED_VM_EXEC_CONTROL, PIN_BASED_VMX_PREEMPTION_TIMER); 
+			if (rdtscp_enabled)
+				vmcs_clear_bits(SECONDARY_VM_EXEC_CONTROL, SECONDARY_EXEC_RDTSCP);
+		}
+	}
+}
+
+static void vmx_save_preemption_timer_on_exit(struct kvm_vcpu *vcpu, bool on)
+{
+	if (kvm_has_preemption_timer) {
+		if (on)
+			vmcs_set_bits(VM_EXIT_CONTROLS, VM_EXIT_SAVE_VMX_PREEMPTION_TIMER);
+		else
+			vmcs_clear_bits(VM_EXIT_CONTROLS, VM_EXIT_SAVE_VMX_PREEMPTION_TIMER);
+	}
+}
+
+static void vmx_prepare_preemption_for_vmentry(struct kvm_vcpu *vcpu)
+{
+	if (kvm_preemption_on(vcpu->kvm)) {
+		kvm_preemption_on_vmentry(vcpu);
+		vmcs_set_bits(CPU_BASED_VM_EXEC_CONTROL, CPU_BASED_RDTSC_EXITING | CPU_BASED_ACTIVATE_SECONDARY_CONTROLS);
+	}
+}
+
+static u32 vmx_read_hw_intr_info(struct kvm_vcpu *vcpu)
+{
+	u32 value = vmcs_read32(VM_ENTRY_INTR_INFO_FIELD);
+	if ((value & INTR_INFO_VALID_MASK) != INTR_INFO_VALID_MASK)
+		value = 0;
+	else if ((value & INTR_TYPE_EXT_INTR) != INTR_TYPE_EXT_INTR)
+		value = 0;
+	return value;
+}
+
+static void vmx_set_intr_info(struct kvm_vcpu *vcpu, u32 value)
+{
+	vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, value);
+}
+
 static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
@@ -7012,8 +7469,15 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	if (vcpu->guest_debug & KVM_GUESTDBG_SINGLESTEP)
 		vmx_set_interrupt_shadow(vcpu, 0);
 
+	if (kvm_has_preemption_timer) {
+		vmx_prepare_preemption_for_vmentry(vcpu);
+		//vmx_set_retired_branch_counter(vcpu, -100LL);
+	}
+
 	atomic_switch_perf_msrs(vmx);
+	prepare_guest_kept_msrs(vmx);
 	debugctlmsr = get_debugctlmsr();
+	update_debugctlmsr(DEBUGCTLMSR_FREEZE_PERFMON_ON_PMI | debugctlmsr);
 
 	vmx->__launched = vmx->loaded_vmcs->launched;
 	asm(
@@ -7153,7 +7617,10 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	vmx->exit_reason = vmcs_read32(VM_EXIT_REASON);
 	trace_kvm_exit(vmx->exit_reason, vcpu, KVM_ISA_VMX);
 
-	vmx_complete_atomic_exit(vmx);
+	if (kvm_has_preemption_timer)
+		kvm_preemption_on_vmexit(vcpu);
+
+ 	vmx_complete_atomic_exit(vmx);
 	vmx_recover_nmi_blocking(vmx);
 	vmx_complete_interrupts(vmx);
 }
@@ -7912,6 +8379,10 @@ static void prepare_vmcs12(struct kvm_vcpu *vcpu, struct vmcs12 *vmcs12)
 		(vmcs12->vm_entry_controls & ~VM_ENTRY_IA32E_MODE) |
 		(vmcs_read32(VM_ENTRY_CONTROLS) & VM_ENTRY_IA32E_MODE);
 
+	if (vmcs12->pin_based_vm_exec_control & PIN_BASED_VMX_PREEMPTION_TIMER)
+                vmcs12->vmx_preemption_timer_value =
+                    vmcs_read32(VMX_PREEMPTION_TIMER_VALUE);
+
 	/* TODO: These cannot have changed unless we have MSR bitmaps and
 	 * the relevant bit asks not to trap the change */
 	vmcs12->guest_ia32_debugctl = vmcs_read64(GUEST_IA32_DEBUGCTL);
@@ -8165,6 +8636,20 @@ static int vmx_check_intercept(struct kvm_vcpu *vcpu,
 	return X86EMUL_CONTINUE;
 }
 
+static struct kvm_preemption_ops kvm_preemption_ops = {
+	.setup_preemption_timer = vmx_setup_preemption_timer,
+	.save_preemption_timer_on_exit = vmx_save_preemption_timer_on_exit,
+	.read_hw_intr_info = vmx_read_hw_intr_info,
+	.set_intr_info = vmx_set_intr_info,
+	.read_retired_branch_counter = vmx_read_retired_branch_counter,
+	.set_retired_branch_counter = vmx_set_retired_branch_counter,
+	.read_preemption_timer_value = vmx_read_preemption_timer_value,
+	.write_preemption_timer_value = vmx_write_preemption_timer_value,
+	.read_guest_program_counter = vmx_read_guest_program_counter,
+	.read_guest_ecx = vmx_read_guest_ecx,
+	.guest_halted = vmx_guest_halted,
+};
+
 static struct kvm_x86_ops vmx_x86_ops = {
 	.cpu_has_kvm_support = cpu_has_kvm_support,
 	.disabled_by_bios = vmx_disabled_by_bios,
@@ -8264,6 +8749,8 @@ static struct kvm_x86_ops vmx_x86_ops = {
 
 	.check_intercept = vmx_check_intercept,
 	.handle_external_intr = vmx_handle_external_intr,
+	.on_preemption = vmx_on_preemption,
+	.kvm_preemption_ops = &kvm_preemption_ops,
 };
 
 static int __init vmx_init(void)

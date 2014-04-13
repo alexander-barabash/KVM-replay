@@ -1,3 +1,6 @@
+#include "kvm_preemption.c"
+#include "bstream.c"
+#include "bscript.c"
 /*
  * Kernel-based Virtual Machine driver for Linux
  *
@@ -613,6 +616,7 @@ static void kvm_destroy_vm(struct kvm *kvm)
 #else
 	kvm_arch_flush_shadow_all(kvm);
 #endif
+	/* KVM_PREEMPTION: free the preemption data. */
 	kvm_arch_destroy_vm(kvm);
 	kvm_destroy_devices(kvm);
 	kvm_free_physmem(kvm);
@@ -2149,6 +2153,12 @@ out_free1:
 		r = kvm_arch_vcpu_ioctl_set_fpu(vcpu, fpu);
 		break;
 	}
+	case KVM_OPEN_RECORD_STREAM:
+		r = kvm_open_record_stream(vcpu);
+		break;
+	case KVM_OPEN_REPLAY_STREAM:
+		r = kvm_open_replay_stream(vcpu);
+		break;
 	default:
 		r = kvm_arch_vcpu_ioctl(filp, ioctl, arg);
 	}
@@ -3179,6 +3189,7 @@ static void kvm_sched_out(struct preempt_notifier *pn,
 
 	if (current->state == TASK_RUNNING)
 		vcpu->preempted = true;
+	kvm_arch_on_preemption(vcpu);
 	kvm_arch_vcpu_put(vcpu);
 }
 
@@ -3242,6 +3253,7 @@ int kvm_init(void *opaque, unsigned vcpu_size, unsigned vcpu_align,
 	kvm_chardev_ops.owner = module;
 	kvm_vm_fops.owner = module;
 	kvm_vcpu_fops.owner = module;
+	kvm_register_bstream_ops(module);
 
 	r = misc_register(&kvm_dev);
 	if (r) {

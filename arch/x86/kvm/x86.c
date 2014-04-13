@@ -2620,6 +2620,12 @@ int kvm_dev_ioctl_check_extension(long ext)
 	case KVM_CAP_TSC_DEADLINE_TIMER:
 		r = boot_cpu_has(X86_FEATURE_TSC_DEADLINE_TIMER);
 		break;
+	case KVM_CAP_PREEMPTION_TIMER:
+		r = kvm_has_preemption_timer;
+		break;
+	case KVM_CAP_PREEMPTION_TIMER_RATE:
+		r = kvm_preemption_timer_rate;
+		break;
 	default:
 		r = 0;
 		break;
@@ -3826,7 +3832,73 @@ long kvm_arch_vm_ioctl(struct file *filp,
 		r = 0;
 		break;
 	}
+	case KVM_SET_PREEMPTION_TIMER_QUANTUM: {
+		u32 preemption_timer_quantum;
 
+		r = -EFAULT;
+		if (copy_from_user(&preemption_timer_quantum, argp, sizeof preemption_timer_quantum))
+			goto out;
+		r = kvm_set_preemption_timer_quantum(kvm, preemption_timer_quantum);
+		break;
+	}
+	case KVM_GET_PREEMPTION_TIMER_QUANTUM: {
+		u32 preemption_timer_quantum;
+		r = kvm_get_preemption_timer_quantum(kvm, &preemption_timer_quantum);
+		if (r != 0)
+			goto out;
+		r = -EFAULT;
+		if (copy_to_user(argp, &preemption_timer_quantum, sizeof preemption_timer_quantum))
+			goto out;
+		r = 0;
+	}
+	case KVM_SET_EXECUTION_FLAG: {
+		u32 execution_mode;
+
+		r = -EFAULT;
+		if (copy_from_user(&execution_mode, argp, sizeof execution_mode))
+			goto out;
+		r = kvm_set_execution_flag(kvm, execution_mode);
+		break;		
+	}
+	case KVM_CLEAR_EXECUTION_FLAG: {
+		u32 execution_mode;
+
+		r = -EFAULT;
+		if (copy_from_user(&execution_mode, argp, sizeof execution_mode))
+			goto out;
+		r = kvm_clear_execution_flag(kvm, execution_mode);
+		break;		
+	}
+	case KVM_GET_EXECUTION_MODE: {
+		u32 execution_mode;
+		r = kvm_get_execution_mode(kvm, &execution_mode);
+		if (r != 0)
+			goto out;
+		r = -EFAULT;
+		if (copy_to_user(argp, &execution_mode, sizeof execution_mode))
+			goto out;
+		r = 0;
+		break;
+	}
+	case KVM_PREEMPTION_USERSPACE_ENTRY: {
+		struct kvm_userspace_preemption_data preemption_data;
+		kvm_preemption_userspace_entry(kvm, &preemption_data);
+		r = -EFAULT;
+		if (copy_to_user(argp, &preemption_data, sizeof preemption_data))
+			goto out;
+		r = 0;
+		break;
+	}
+	case KVM_PREEMPTION_USERSPACE_EXIT: {
+		struct kvm_userspace_preemption_data preemption_data;
+		r = -EFAULT;
+		if (copy_from_user(&preemption_data, argp, sizeof preemption_data))
+			goto out;
+		kvm_preemption_userspace_exit(kvm, &preemption_data);
+		r = 0;
+		break;
+	}
+	
 	default:
 		;
 	}
@@ -6035,8 +6107,10 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 	struct kvm *kvm = vcpu->kvm;
 
 	vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
+	kvm_preemption_lock_vcpu(vcpu);
 	r = vapic_enter(vcpu);
 	if (r) {
+		kvm_preemption_unlock_vcpu(vcpu);
 		srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 		return r;
 	}
@@ -6047,9 +6121,12 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 		    !vcpu->arch.apf.halted)
 			r = vcpu_enter_guest(vcpu);
 		else {
+			kvm_preemption_vcpu_halted(vcpu);
+			kvm_preemption_unlock_vcpu(vcpu);
 			srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 			kvm_vcpu_block(vcpu);
 			vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
+			kvm_preemption_lock_vcpu(vcpu);
 			if (kvm_check_request(KVM_REQ_UNHALT, vcpu)) {
 				kvm_apic_accept_events(vcpu);
 				switch(vcpu->arch.mp_state) {
@@ -6089,12 +6166,15 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 			++vcpu->stat.signal_exits;
 		}
 		if (need_resched()) {
+			kvm_preemption_unlock_vcpu(vcpu);
 			srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 			kvm_resched(vcpu);
 			vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
+			kvm_preemption_lock_vcpu(vcpu);
 		}
 	}
 
+	kvm_preemption_unlock_vcpu(vcpu);
 	srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 
 	vapic_exit(vcpu);
@@ -6941,6 +7021,7 @@ void kvm_arch_vcpu_uninit(struct kvm_vcpu *vcpu)
 {
 	int idx;
 
+	kvm_vcpu_uninit_preemption_data(vcpu);
 	kvm_pmu_destroy(vcpu);
 	kfree(vcpu->arch.mce_banks);
 	kvm_free_lapic(vcpu);
@@ -6954,8 +7035,13 @@ void kvm_arch_vcpu_uninit(struct kvm_vcpu *vcpu)
 
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 {
+	int r;
 	if (type)
 		return -EINVAL;
+
+	r = kvm_init_preemption_data(kvm, kvm_x86_ops->kvm_preemption_ops);
+	if (r < 0)
+		return r;
 
 	INIT_LIST_HEAD(&kvm->arch.active_mmu_pages);
 	INIT_LIST_HEAD(&kvm->arch.zapped_obsolete_pages);
@@ -7033,6 +7119,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
 		mem.slot = TSS_PRIVATE_MEMSLOT;
 		kvm_set_memory_region(kvm, &mem);
 	}
+	kvm_destroy_preemption_data(kvm);
 	kvm_iommu_unmap_guest(kvm);
 	kfree(kvm->arch.vpic);
 	kfree(kvm->arch.vioapic);
@@ -7396,6 +7483,12 @@ bool kvm_arch_can_inject_async_page_present(struct kvm_vcpu *vcpu)
 	else
 		return !kvm_event_needs_reinjection(vcpu) &&
 			kvm_x86_ops->interrupt_allowed(vcpu);
+}
+
+void kvm_arch_on_preemption(struct kvm_vcpu *vcpu)
+{
+	if(kvm_x86_ops->on_preemption)
+		kvm_x86_ops->on_preemption(vcpu);
 }
 
 EXPORT_TRACEPOINT_SYMBOL_GPL(kvm_exit);

@@ -10,6 +10,7 @@
 #include <linux/types.h>
 #include <linux/compiler.h>
 #include <linux/ioctl.h>
+#include <linux/kvm_preemption.h>
 #include <asm/kvm.h>
 
 #define KVM_API_VERSION 12
@@ -171,6 +172,7 @@ struct kvm_pit_config {
 #define KVM_EXIT_WATCHDOG         21
 #define KVM_EXIT_S390_TSCH        22
 #define KVM_EXIT_EPR              23
+#define KVM_EXIT_PREEMPTION_TIMER 24
 
 /* For KVM_EXIT_INTERNAL_ERROR */
 /* Emulate instruction failed. */
@@ -318,6 +320,8 @@ struct kvm_run {
 		struct kvm_sync_regs regs;
 		char padding[1024];
 	} s;
+
+	struct preemption_debug_data preemption_debug_data;
 };
 
 /* for KVM_REGISTER_COALESCED_MMIO / KVM_UNREGISTER_COALESCED_MMIO */
@@ -667,6 +671,10 @@ struct kvm_ppc_smmu_info {
 #define KVM_CAP_PPC_RTAS 91
 #define KVM_CAP_IRQ_XICS 92
 #define KVM_CAP_ARM_EL1_32BIT 93
+#ifdef __KVM_HAVE_PREEMPTION_TIMER
+#define KVM_CAP_PREEMPTION_TIMER 94
+#define KVM_CAP_PREEMPTION_TIMER_RATE 95
+#endif
 
 #ifdef KVM_CAP_IRQ_ROUTING
 
@@ -1012,6 +1020,18 @@ struct kvm_s390_ucas_mapping {
 #define KVM_KVMCLOCK_CTRL	  _IO(KVMIO,   0xad)
 #define KVM_ARM_VCPU_INIT	  _IOW(KVMIO,  0xae, struct kvm_vcpu_init)
 #define KVM_GET_REG_LIST	  _IOWR(KVMIO, 0xb0, struct kvm_reg_list)
+
+/* Available with KVM_CAP_PREEMPTION_TIMER */
+#define KVM_SET_PREEMPTION_TIMER_QUANTUM	_IOW(KVMIO,  0xc0, __u32)
+#define KVM_GET_PREEMPTION_TIMER_QUANTUM	_IOW(KVMIO,  0xc1, __u32)
+#define KVM_SET_EXECUTION_FLAG		_IOW(KVMIO,  0xc2, __u32)
+#define KVM_CLEAR_EXECUTION_FLAG	_IOW(KVMIO,  0xc3, __u32)
+#define KVM_GET_EXECUTION_MODE		_IOW(KVMIO,  0xc4, __u32)
+#define KVM_PREEMPTION_USERSPACE_ENTRY	_IOW(KVMIO,  0xc5, struct kvm_userspace_preemption_data)
+#define KVM_PREEMPTION_USERSPACE_EXIT	_IOW(KVMIO,  0xc6, struct kvm_userspace_preemption_data)
+#define KVM_OPEN_RECORD_STREAM		_IO(KVMIO, 0xca)
+#define KVM_OPEN_REPLAY_STREAM		_IO(KVMIO, 0xcb)
+
 
 #define KVM_DEV_ASSIGN_ENABLE_IOMMU	(1 << 0)
 #define KVM_DEV_ASSIGN_PCI_2_3		(1 << 1)

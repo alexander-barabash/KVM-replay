@@ -30,6 +30,7 @@
 #include <linux/kvm_para.h>
 
 #include <linux/kvm_types.h>
+#include <linux/kvm_preemption_data.h>
 
 #include <asm/kvm_host.h>
 
@@ -231,6 +232,7 @@ struct kvm_vcpu {
 
 	struct mutex mutex;
 	struct kvm_run *run;
+	u64 preemption_data[KVM_VCPU_PREEMPTION_DATA_SIZE / 8];
 
 	int fpu_active;
 	int guest_fpu_loaded, guest_xcr0_loaded;
@@ -406,6 +408,8 @@ struct kvm {
 #endif
 	long tlbs_dirty;
 	struct list_head devices;
+
+	u64 preemption_data[KVM_PREEMPTION_DATA_SIZE / 8];
 };
 
 #define kvm_err(fmt, ...) \
@@ -640,6 +644,7 @@ void kvm_arch_vcpu_uninit(struct kvm_vcpu *vcpu);
 void kvm_arch_vcpu_free(struct kvm_vcpu *vcpu);
 void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu);
 void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu);
+void kvm_arch_on_preemption(struct kvm_vcpu *vcpu);
 struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm, unsigned int id);
 int kvm_arch_vcpu_setup(struct kvm_vcpu *vcpu);
 int kvm_arch_vcpu_postcreate(struct kvm_vcpu *vcpu);
