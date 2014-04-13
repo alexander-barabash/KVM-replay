@@ -362,10 +362,10 @@ ssize_t bstream_write_unlocked(struct bstream *bstream,
 	}
 
 	if (copied > 0) {
-		if (((bstream->write_offset + copied) / 1000000) !=
-		    ((bstream->write_offset) / 1000000)) {
+		if (((bstream->write_offset + copied) >> 20) !=
+		    ((bstream->write_offset) >> 20)) {
 			printk(KERN_WARNING "Wrote %lld MBytes to bstream\n",
-			       ((bstream->write_offset + copied) / 1000000));
+			       ((bstream->write_offset + copied) >> 20));
 		}
 	}
 	bstream->write_offset += copied;
