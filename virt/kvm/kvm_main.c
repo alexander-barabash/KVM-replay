@@ -1,4 +1,4 @@
-#include "kvm_preemption.c"
+#include "rkvm.c"
 #include "bstream.c"
 #include "bscript.c"
 /*
@@ -616,7 +616,7 @@ static void kvm_destroy_vm(struct kvm *kvm)
 #else
 	kvm_arch_flush_shadow_all(kvm);
 #endif
-	/* KVM_PREEMPTION: free the preemption data. */
+	/* RKVM: free the preemption data. */
 	kvm_arch_destroy_vm(kvm);
 	kvm_destroy_devices(kvm);
 	kvm_free_physmem(kvm);

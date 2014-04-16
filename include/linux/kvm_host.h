@@ -30,7 +30,7 @@
 #include <linux/kvm_para.h>
 
 #include <linux/kvm_types.h>
-#include <linux/kvm_preemption_data.h>
+#include <linux/rkvm_data.h>
 
 #include <asm/kvm_host.h>
 
@@ -409,7 +409,7 @@ struct kvm {
 	long tlbs_dirty;
 	struct list_head devices;
 
-	u64 preemption_data[KVM_PREEMPTION_DATA_SIZE / 8];
+	u64 preemption_data[RKVM_DATA_SIZE / 8];
 };
 
 #define kvm_err(fmt, ...) \

@@ -3880,21 +3880,21 @@ long kvm_arch_vm_ioctl(struct file *filp,
 		r = 0;
 		break;
 	}
-	case KVM_PREEMPTION_USERSPACE_ENTRY: {
+	case RKVM_USERSPACE_ENTRY: {
 		struct kvm_userspace_preemption_data preemption_data;
-		kvm_preemption_userspace_entry(kvm, &preemption_data);
+		rkvm_userspace_entry(kvm, &preemption_data);
 		r = -EFAULT;
 		if (copy_to_user(argp, &preemption_data, sizeof preemption_data))
 			goto out;
 		r = 0;
 		break;
 	}
-	case KVM_PREEMPTION_USERSPACE_EXIT: {
+	case RKVM_USERSPACE_EXIT: {
 		struct kvm_userspace_preemption_data preemption_data;
 		r = -EFAULT;
 		if (copy_from_user(&preemption_data, argp, sizeof preemption_data))
 			goto out;
-		kvm_preemption_userspace_exit(kvm, &preemption_data);
+		rkvm_userspace_exit(kvm, &preemption_data);
 		r = 0;
 		break;
 	}
@@ -6107,10 +6107,10 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 	struct kvm *kvm = vcpu->kvm;
 
 	vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
-	kvm_preemption_lock_vcpu(vcpu);
+	rkvm_lock_vcpu(vcpu);
 	r = vapic_enter(vcpu);
 	if (r) {
-		kvm_preemption_unlock_vcpu(vcpu);
+		rkvm_unlock_vcpu(vcpu);
 		srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 		return r;
 	}
@@ -6121,12 +6121,12 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 		    !vcpu->arch.apf.halted)
 			r = vcpu_enter_guest(vcpu);
 		else {
-			kvm_preemption_vcpu_halted(vcpu);
-			kvm_preemption_unlock_vcpu(vcpu);
+			rkvm_vcpu_halted(vcpu);
+			rkvm_unlock_vcpu(vcpu);
 			srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 			kvm_vcpu_block(vcpu);
 			vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
-			kvm_preemption_lock_vcpu(vcpu);
+			rkvm_lock_vcpu(vcpu);
 			if (kvm_check_request(KVM_REQ_UNHALT, vcpu)) {
 				kvm_apic_accept_events(vcpu);
 				switch(vcpu->arch.mp_state) {
@@ -6166,15 +6166,15 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 			++vcpu->stat.signal_exits;
 		}
 		if (need_resched()) {
-			kvm_preemption_unlock_vcpu(vcpu);
+			rkvm_unlock_vcpu(vcpu);
 			srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 			kvm_resched(vcpu);
 			vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
-			kvm_preemption_lock_vcpu(vcpu);
+			rkvm_lock_vcpu(vcpu);
 		}
 	}
 
-	kvm_preemption_unlock_vcpu(vcpu);
+	rkvm_unlock_vcpu(vcpu);
 	srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 
 	vapic_exit(vcpu);
@@ -7039,7 +7039,7 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 	if (type)
 		return -EINVAL;
 
-	r = kvm_init_preemption_data(kvm, kvm_x86_ops->kvm_preemption_ops);
+	r = kvm_init_preemption_data(kvm, kvm_x86_ops->rkvm_ops);
 	if (r < 0)
 		return r;
 

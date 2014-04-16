@@ -21,7 +21,7 @@
 #include "cpuid.h"
 
 #include <linux/kvm_host.h>
-#include <linux/kvm_preemption_data.h>
+#include <linux/rkvm_data.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -4358,7 +4358,7 @@ static u32 vmx_exec_control(struct vcpu_vmx *vmx)
 static u32 vmx_secondary_exec_control(struct vcpu_vmx *vmx)
 {
 	u32 exec_control = vmcs_config.cpu_based_2nd_exec_ctrl;
-	if (kvm_preemption_on(vmx->vcpu.kvm))
+	if (rkvm_on(vmx->vcpu.kvm))
 		exec_control |=
 			(vmcs_config.opt_cpu_based_2nd_exec_ctrl & SECONDARY_EXEC_RDTSCP);
 	if (!vm_need_virtualize_apic_accesses(vmx->vcpu.kvm))
@@ -5741,7 +5741,7 @@ static int handle_rdtsc_with_preemption(struct kvm_vcpu *vcpu)
 {
 	u64 tsc_value;
 	bool do_record;
-	if (!kvm_preemption_retrieve_rdtsc_value(vcpu,
+	if (!rkvm_retrieve_rdtsc_value(vcpu,
 						&tsc_value,
 						&do_record))
 		return 0;
@@ -5756,7 +5756,7 @@ static int handle_rdtscp_with_preemption(struct kvm_vcpu *vcpu)
 {
 	u64 tsc_value;
 	bool do_record;
-	if (!kvm_preemption_retrieve_rdtsc_value(vcpu,
+	if (!rkvm_retrieve_rdtsc_value(vcpu,
 						 &tsc_value,
 						 &do_record))
 		return 0;
@@ -7428,8 +7428,8 @@ static void vmx_save_preemption_timer_on_exit(struct kvm_vcpu *vcpu, bool on)
 
 static void vmx_prepare_preemption_for_vmentry(struct kvm_vcpu *vcpu)
 {
-	if (kvm_preemption_on(vcpu->kvm)) {
-		kvm_preemption_on_vmentry(vcpu);
+	if (rkvm_on(vcpu->kvm)) {
+		rkvm_on_vmentry(vcpu);
 		vmcs_set_bits(CPU_BASED_VM_EXEC_CONTROL, CPU_BASED_RDTSC_EXITING | CPU_BASED_ACTIVATE_SECONDARY_CONTROLS);
 	}
 }
@@ -7630,7 +7630,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	trace_kvm_exit(vmx->exit_reason, vcpu, KVM_ISA_VMX);
 
 	if (kvm_has_preemption_timer)
-		kvm_preemption_on_vmexit(vcpu);
+		rkvm_on_vmexit(vcpu);
 
  	vmx_complete_atomic_exit(vmx);
 	vmx_recover_nmi_blocking(vmx);
@@ -8648,7 +8648,7 @@ static int vmx_check_intercept(struct kvm_vcpu *vcpu,
 	return X86EMUL_CONTINUE;
 }
 
-static struct kvm_preemption_ops kvm_preemption_ops = {
+static struct rkvm_ops rkvm_ops = {
 	.setup_preemption_timer = vmx_setup_preemption_timer,
 	.save_preemption_timer_on_exit = vmx_save_preemption_timer_on_exit,
 	.read_hw_intr_info = vmx_read_hw_intr_info,
@@ -8762,7 +8762,7 @@ static struct kvm_x86_ops vmx_x86_ops = {
 	.check_intercept = vmx_check_intercept,
 	.handle_external_intr = vmx_handle_external_intr,
 	.on_preemption = vmx_on_preemption,
-	.kvm_preemption_ops = &kvm_preemption_ops,
+	.rkvm_ops = &rkvm_ops,
 };
 
 static int __init vmx_init(void)

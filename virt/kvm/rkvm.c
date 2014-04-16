@@ -1,4 +1,4 @@
-#include <linux/kvm_preemption_data.h>
+#include <linux/rkvm_data.h>
 #include <linux/bscript.h>
 #include <linux/bstream.h>
 #include <linux/kvm_host.h>
@@ -7,8 +7,8 @@
 #define KVM_STATIC_CHECK(name, expr) \
 	u8 static_check_##name[(expr)? 1: -1] __attribute__((unused))
 
-struct kvm_preemption_data {
-	struct kvm_preemption_ops *ops;
+struct rkvm_data {
+	struct rkvm_ops *ops;
 
 	spinlock_t spinlock;
 	spinlock_t lockstep_spinlock;
@@ -88,8 +88,8 @@ struct kvm_vcpu_preemption_data {
 	struct kvm_stream_data *replay_stream_data;
 };
 
-#define KVM_PREEMPTION_DATA(kvm) \
-	((struct kvm_preemption_data *)(&(kvm)->preemption_data))
+#define RKVM_DATA(kvm) \
+	((struct rkvm_data *)(&(kvm)->preemption_data))
 
 #define VCPU_PREEMPTION_DATA(vcpu) \
 	((struct kvm_vcpu_preemption_data *)(&(vcpu)->preemption_data))
@@ -99,17 +99,17 @@ struct kvm_vcpu_preemption_data {
 
 bool kvm_has_preemption_timer;
 EXPORT_SYMBOL_GPL(kvm_has_preemption_timer);
-int kvm_preemption_timer_rate;
-EXPORT_SYMBOL_GPL(kvm_preemption_timer_rate);
+int rkvm_timer_rate;
+EXPORT_SYMBOL_GPL(rkvm_timer_rate);
 
 static inline u64 preemption_timer_to_tsc(u64 preemption_timer)
 {
-	return preemption_timer << kvm_preemption_timer_rate;
+	return preemption_timer << rkvm_timer_rate;
 }
 
 static inline u64 tsc_to_preemption_timer(u64 tsc)
 {
-	return (tsc + (1 << kvm_preemption_timer_rate) - 1) >> kvm_preemption_timer_rate;
+	return (tsc + (1 << rkvm_timer_rate) - 1) >> rkvm_timer_rate;
 }
 
 static inline u64 preemption_timer_since_tsc(u64 initial_tsc) {
@@ -124,15 +124,15 @@ static inline u64 preemption_timer_since_tsc(u64 initial_tsc) {
 }
 
 static inline bool
-kvm_preemption_vcpu_launched(struct kvm_vcpu_preemption_data *vcpu_data)
+rkvm_vcpu_launched(struct kvm_vcpu_preemption_data *vcpu_data)
 {
 	return likely(vcpu_data->vcpu_launched);
 }
 
 static inline bool
-kvm_preemption_vcpu_running(struct kvm_vcpu_preemption_data *vcpu_data)
+rkvm_vcpu_running(struct kvm_vcpu_preemption_data *vcpu_data)
 {
-	return kvm_preemption_vcpu_launched(vcpu_data) &&
+	return rkvm_vcpu_launched(vcpu_data) &&
 		!vcpu_data->vcpu_halted;
 }
 
@@ -146,7 +146,7 @@ kvm_preemption_vcpu_running(struct kvm_vcpu_preemption_data *vcpu_data)
 	} while (0)
 
 static inline void update_preemption_debug_data(struct preemption_debug_data *debug,
-						struct kvm_preemption_data *kvm_data,
+						struct rkvm_data *kvm_data,
 						struct kvm_vcpu_preemption_data *vcpu_data,
 						bool counted_exit)
 {
@@ -164,7 +164,7 @@ static inline void update_preemption_debug_data(struct preemption_debug_data *de
 bool kvm_enable_preemption_timer(struct kvm_vcpu *vcpu)
 {
 	struct kvm *kvm = vcpu->kvm;
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	bool preemption_on;
 	if (kvm_has_preemption_timer) {
 		PREEMPTION_LOCKED(kvm_data,
@@ -176,9 +176,9 @@ bool kvm_enable_preemption_timer(struct kvm_vcpu *vcpu)
 }
 EXPORT_SYMBOL_GPL(kvm_enable_preemption_timer);
 
-bool kvm_preemption_on(struct kvm *kvm)
+bool rkvm_on(struct kvm *kvm)
 {
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	bool preemption_on;
 	if (kvm_has_preemption_timer) {
 		PREEMPTION_LOCKED(kvm_data,
@@ -188,7 +188,7 @@ bool kvm_preemption_on(struct kvm *kvm)
 	}
 	return preemption_on;
 }
-EXPORT_SYMBOL_GPL(kvm_preemption_on);
+EXPORT_SYMBOL_GPL(rkvm_on);
 
 static inline struct bstream *get_record_bstream(struct kvm_vcpu *vcpu)
 {
@@ -221,8 +221,8 @@ kvm_record_vmexit(struct kvm_vcpu *vcpu)
 {
 	struct kvm *kvm = vcpu->kvm;
 	struct kvm_vcpu_preemption_data *vcpu_data = VCPU_PREEMPTION_DATA(vcpu);
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
-	struct kvm_preemption_ops *ops = kvm_data->ops;
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
+	struct rkvm_ops *ops = kvm_data->ops;
 	u64 guest_rip;
 	u32 guest_ecx;
 	u64 retired_branch_counter = vcpu_data->accumulate_retired_branch_counter;
@@ -258,11 +258,11 @@ kvm_record_vmexit(struct kvm_vcpu *vcpu)
 	vcpu_data->reported_guest_ecx = guest_ecx;
 }
 
-void kvm_preemption_lock_vcpu(struct kvm_vcpu *vcpu)
+void rkvm_lock_vcpu(struct kvm_vcpu *vcpu)
 {
 	struct kvm *kvm = vcpu->kvm;
 	struct kvm_vcpu_preemption_data *vcpu_data = VCPU_PREEMPTION_DATA(vcpu);
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	bool need_lockstep_lock;
 
 	PREEMPTION_LOCKED(kvm_data,
@@ -272,24 +272,24 @@ void kvm_preemption_lock_vcpu(struct kvm_vcpu *vcpu)
 		vcpu_data->vcpu_locked = true;
 	}
 }
-EXPORT_SYMBOL_GPL(kvm_preemption_lock_vcpu);
+EXPORT_SYMBOL_GPL(rkvm_lock_vcpu);
 
-void kvm_preemption_vcpu_halted(struct kvm_vcpu *vcpu)
+void rkvm_vcpu_halted(struct kvm_vcpu *vcpu)
 {
 	struct kvm *kvm = vcpu->kvm;
 	struct kvm_vcpu_preemption_data *vcpu_data = VCPU_PREEMPTION_DATA(vcpu);
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 
 	PREEMPTION_LOCKED(kvm_data,
 			  vcpu_data->vcpu_halted = true);
 }
-EXPORT_SYMBOL_GPL(kvm_preemption_vcpu_halted);
+EXPORT_SYMBOL_GPL(rkvm_vcpu_halted);
 
-void kvm_preemption_unlock_vcpu(struct kvm_vcpu *vcpu)
+void rkvm_unlock_vcpu(struct kvm_vcpu *vcpu)
 {
 	struct kvm *kvm = vcpu->kvm;
 	struct kvm_vcpu_preemption_data *vcpu_data = VCPU_PREEMPTION_DATA(vcpu);
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 
 	kvm_record_vmexit(vcpu);
 
@@ -307,15 +307,15 @@ void kvm_preemption_unlock_vcpu(struct kvm_vcpu *vcpu)
 				     vcpu_data->entry_preemption_timer_value > 0);
 
 }
-EXPORT_SYMBOL_GPL(kvm_preemption_unlock_vcpu);
+EXPORT_SYMBOL_GPL(rkvm_unlock_vcpu);
 
 void
-kvm_preemption_on_vmexit(struct kvm_vcpu *vcpu)
+rkvm_on_vmexit(struct kvm_vcpu *vcpu)
 {
 	struct kvm *kvm = vcpu->kvm;
 	struct kvm_vcpu_preemption_data *vcpu_data = VCPU_PREEMPTION_DATA(vcpu);
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
-	struct kvm_preemption_ops *ops = kvm_data->ops;
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
+	struct rkvm_ops *ops = kvm_data->ops;
 	struct bstream *record_bstream = get_record_bstream(vcpu);
 	u32 preemption_delta =
 		vcpu_data->entry_preemption_timer_value -
@@ -338,14 +338,14 @@ kvm_preemption_on_vmexit(struct kvm_vcpu *vcpu)
 	if (!vcpu_data->vcpu_locked)
 		kvm_update_preemption_data(kvm);
 }
-EXPORT_SYMBOL_GPL(kvm_preemption_on_vmexit);
+EXPORT_SYMBOL_GPL(rkvm_on_vmexit);
 
 int kvm_init_preemption_data(struct kvm *kvm,
-			     struct kvm_preemption_ops *ops)
+			     struct rkvm_ops *ops)
 {
 	KVM_STATIC_CHECK(kvm_run_size, sizeof(struct kvm_run) <= PAGE_SIZE);
-	KVM_STATIC_CHECK(kvm_data_size, sizeof(struct kvm_preemption_data) <= sizeof(kvm->preemption_data));
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	KVM_STATIC_CHECK(kvm_data_size, sizeof(struct rkvm_data) <= sizeof(kvm->preemption_data));
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	if (!ops)
 		return -EINVAL; /* TODO: Should be: unsupported. */
 	kvm_data->ops = ops;
@@ -364,7 +364,7 @@ void kvm_destroy_preemption_data(struct kvm *kvm)
 EXPORT_SYMBOL_GPL(kvm_destroy_preemption_data);
 
 static inline void
-update_preemption_parameters(struct kvm_preemption_data *kvm_data,
+update_preemption_parameters(struct rkvm_data *kvm_data,
 			     u64 accumulate_preemption_timer,
 			     bool running)
 {
@@ -381,7 +381,7 @@ update_preemption_parameters(struct kvm_preemption_data *kvm_data,
 
 static void kvm_update_preemption_data(struct kvm *kvm)
 {
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	struct kvm_userspace_preemption_data *userspace = 
 		&kvm_data->userspace;
 
@@ -396,7 +396,7 @@ static void kvm_update_preemption_data(struct kvm *kvm)
 		vcpu_data = VCPU_PREEMPTION_DATA(vcpu);
 		update_preemption_parameters(kvm_data,
 					     vcpu_data->accumulate_preemption_timer,
-					     kvm_preemption_vcpu_running(vcpu_data));
+					     rkvm_vcpu_running(vcpu_data));
 	}
 	update_preemption_parameters(kvm_data,
 				     userspace->accumulate_preemption_timer,
@@ -408,18 +408,18 @@ static void kvm_update_preemption_data(struct kvm *kvm)
 	spin_unlock(&kvm_data->spinlock);
 }
 
-void kvm_preemption_on_vmentry(struct kvm_vcpu *vcpu)
+void rkvm_on_vmentry(struct kvm_vcpu *vcpu)
 {
 	KVM_STATIC_CHECK(vcpu_preemption_data_size, sizeof(struct kvm_vcpu_preemption_data) <= sizeof(vcpu->preemption_data));
 	struct kvm *kvm = vcpu->kvm;
 	struct kvm_vcpu_preemption_data *vcpu_data = VCPU_PREEMPTION_DATA(vcpu);
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
-	struct kvm_preemption_ops *ops = kvm_data->ops;
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
+	struct rkvm_ops *ops = kvm_data->ops;
 	bool use_preemption_timer;
 	u64 preemption_timer_value;
 	u32 preemption_timer_quantum;
 	u64 preemption_timer_horizon;
-	bool was_running = kvm_preemption_vcpu_running(vcpu_data);
+	bool was_running = rkvm_vcpu_running(vcpu_data);
 
 	spin_lock(&kvm_data->spinlock);
 	preemption_timer_quantum = kvm_data->preemption_timer_quantum;
@@ -488,12 +488,12 @@ void kvm_preemption_on_vmentry(struct kvm_vcpu *vcpu)
 	}
 	(*ops->save_preemption_timer_on_exit)(vcpu, use_preemption_timer);
 }
-EXPORT_SYMBOL_GPL(kvm_preemption_on_vmentry);
+EXPORT_SYMBOL_GPL(rkvm_on_vmentry);
 
-void kvm_preemption_userspace_entry(struct kvm *kvm,
+void rkvm_userspace_entry(struct kvm *kvm,
 				    struct kvm_userspace_preemption_data *out_userspace)
 {
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	struct kvm_userspace_preemption_data *userspace = &kvm_data->userspace;
 	bool need_lockstep_lock;
 
@@ -522,12 +522,12 @@ void kvm_preemption_userspace_entry(struct kvm *kvm,
 		spin_lock(&kvm_data->lockstep_spinlock);
 	*/
 }
-EXPORT_SYMBOL_GPL(kvm_preemption_userspace_entry);
+EXPORT_SYMBOL_GPL(rkvm_userspace_entry);
 
-void kvm_preemption_userspace_exit(struct kvm *kvm,
+void rkvm_userspace_exit(struct kvm *kvm,
 				   struct kvm_userspace_preemption_data *userspace_in)
 {
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	struct kvm_userspace_preemption_data *userspace = &kvm_data->userspace;
 	bool need_lockstep_unlock;
 	spin_lock(&kvm_data->spinlock);
@@ -543,14 +543,14 @@ void kvm_preemption_userspace_exit(struct kvm *kvm,
 		spin_unlock(&kvm_data->lockstep_spinlock);
 	*/
 }
-EXPORT_SYMBOL_GPL(kvm_preemption_userspace_exit);
+EXPORT_SYMBOL_GPL(rkvm_userspace_exit);
 
-bool kvm_preemption_retrieve_rdtsc_value(struct kvm_vcpu *vcpu,
+bool rkvm_retrieve_rdtsc_value(struct kvm_vcpu *vcpu,
 					 u64 *out_tsc_value,
 					 bool *out_do_record)
 {
 	struct kvm *kvm = vcpu->kvm;
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	struct kvm_vcpu_preemption_data *vcpu_data = VCPU_PREEMPTION_DATA(vcpu);
 	bool retrieved;
 	bool do_record;
@@ -573,12 +573,12 @@ bool kvm_preemption_retrieve_rdtsc_value(struct kvm_vcpu *vcpu,
 	}
 	return retrieved;
 }
-EXPORT_SYMBOL_GPL(kvm_preemption_retrieve_rdtsc_value);
+EXPORT_SYMBOL_GPL(rkvm_retrieve_rdtsc_value);
 
 int kvm_set_preemption_timer_quantum(struct kvm *kvm, u32 preemption_timer_quantum)
 {
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
-	struct kvm_preemption_ops *ops = kvm_data->ops;
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
+	struct rkvm_ops *ops = kvm_data->ops;
 	struct kvm_vcpu *vcpu;
 	int i;
 	int ret;
@@ -609,7 +609,7 @@ EXPORT_SYMBOL_GPL(kvm_set_preemption_timer_quantum);
 
 int kvm_get_preemption_timer_quantum(struct kvm *kvm, u32 *preemption_timer_quantum)
 {
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	PREEMPTION_LOCKED(kvm_data,
 			  *preemption_timer_quantum = kvm_data->preemption_timer_quantum);
 	return 0;
@@ -640,7 +640,7 @@ static inline bool kvm_execution_mode_valid(struct kvm *kvm, u32 execution_mode)
 
 int kvm_set_execution_flag(struct kvm *kvm, u32 execution_mode)
 {
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	bool execute_in_lockstep = ((execution_mode & KVM_EXECUTION_MODE_LOCKSTEP) == KVM_EXECUTION_MODE_LOCKSTEP);
 	bool record_execution = ((execution_mode & KVM_EXECUTION_MODE_RECORD) == KVM_EXECUTION_MODE_RECORD);
 	bool replay_execution = ((execution_mode & KVM_EXECUTION_MODE_REPLAY) == KVM_EXECUTION_MODE_REPLAY);
@@ -660,7 +660,7 @@ EXPORT_SYMBOL_GPL(kvm_set_execution_flag);
 
 int kvm_clear_execution_flag(struct kvm *kvm, u32 execution_mode)
 {
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	bool execute_in_lockstep = ((~execution_mode & KVM_EXECUTION_MODE_LOCKSTEP) == KVM_EXECUTION_MODE_LOCKSTEP);
 	bool record_execution = ((~execution_mode & KVM_EXECUTION_MODE_RECORD) == KVM_EXECUTION_MODE_RECORD);
 	bool replay_execution = ((~execution_mode & KVM_EXECUTION_MODE_REPLAY) == KVM_EXECUTION_MODE_REPLAY);
@@ -680,7 +680,7 @@ EXPORT_SYMBOL_GPL(kvm_clear_execution_flag);
 
 int kvm_get_execution_mode(struct kvm *kvm, u32 *execution_mode)
 {
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	PREEMPTION_LOCKED(kvm_data,
 			  *execution_mode =
 			  (kvm_data->execute_in_lockstep ? KVM_EXECUTION_MODE_LOCKSTEP : 0) |
@@ -717,7 +717,7 @@ static ssize_t kvm_bstream_write(struct file *filp, const char __user *buf, size
 static void kvm_do_bstream_release(struct kvm_vcpu *vcpu, struct kvm_stream_data *stream_data)
 {
 	struct kvm *kvm = vcpu->kvm;
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	struct bstream *bstream;
 
 	PREEMPTION_LOCKED(kvm_data,
@@ -740,7 +740,7 @@ static int kvm_bstream_release(struct inode *inode, struct file *filp)
 
 	if (vcpu) {
 		struct kvm *kvm = vcpu->kvm;
-		struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+		struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 		bool need_cleanup;
 		PREEMPTION_LOCKED(kvm_data,
 				  if (stream_data->back_pointer) {
@@ -764,7 +764,7 @@ static int kvm_bstream_release(struct inode *inode, struct file *filp)
 static void kvm_vcpu_uninit_bstream_data(struct kvm_vcpu *vcpu, struct kvm_stream_data **back_pointer)
 {
 	struct kvm *kvm = vcpu->kvm;
-	struct kvm_preemption_data *kvm_data = KVM_PREEMPTION_DATA(kvm);
+	struct rkvm_data *kvm_data = RKVM_DATA(kvm);
 	struct kvm_stream_data *stream_data;
 	bool need_cleanup;
 	PREEMPTION_LOCKED(kvm_data,

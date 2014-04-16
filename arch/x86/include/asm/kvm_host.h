@@ -21,7 +21,7 @@
 #include <linux/kvm.h>
 #include <linux/kvm_para.h>
 #include <linux/kvm_types.h>
-#include <linux/kvm_preemption_data.h>
+#include <linux/rkvm_data.h>
 #include <linux/perf_event.h>
 #include <linux/pvclock_gtod.h>
 #include <linux/clocksource.h>
@@ -747,7 +747,7 @@ struct kvm_x86_ops {
 	void (*handle_external_intr)(struct kvm_vcpu *vcpu);
 
 	void (*on_preemption)(struct kvm_vcpu *vcpu);
-	struct kvm_preemption_ops *kvm_preemption_ops;
+	struct rkvm_ops *rkvm_ops;
 };
 
 struct kvm_arch_async_pf {

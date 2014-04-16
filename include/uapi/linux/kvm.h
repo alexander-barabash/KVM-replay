@@ -10,7 +10,7 @@
 #include <linux/types.h>
 #include <linux/compiler.h>
 #include <linux/ioctl.h>
-#include <linux/kvm_preemption.h>
+#include <linux/rkvm.h>
 #include <asm/kvm.h>
 
 #define KVM_API_VERSION 12
@@ -1027,8 +1027,8 @@ struct kvm_s390_ucas_mapping {
 #define KVM_SET_EXECUTION_FLAG		_IOW(KVMIO,  0xc2, __u32)
 #define KVM_CLEAR_EXECUTION_FLAG	_IOW(KVMIO,  0xc3, __u32)
 #define KVM_GET_EXECUTION_MODE		_IOW(KVMIO,  0xc4, __u32)
-#define KVM_PREEMPTION_USERSPACE_ENTRY	_IOW(KVMIO,  0xc5, struct kvm_userspace_preemption_data)
-#define KVM_PREEMPTION_USERSPACE_EXIT	_IOW(KVMIO,  0xc6, struct kvm_userspace_preemption_data)
+#define RKVM_USERSPACE_ENTRY	_IOW(KVMIO,  0xc5, struct kvm_userspace_preemption_data)
+#define RKVM_USERSPACE_EXIT	_IOW(KVMIO,  0xc6, struct kvm_userspace_preemption_data)
 #define KVM_OPEN_RECORD_STREAM		_IO(KVMIO, 0xca)
 #define KVM_OPEN_REPLAY_STREAM		_IO(KVMIO, 0xcb)
 

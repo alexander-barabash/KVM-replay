@@ -8,7 +8,7 @@
 
 #include <asm/types.h>
 #include <linux/spinlock.h>
-#include <linux/kvm_preemption.h>
+#include <linux/rkvm.h>
 
 struct kvm;
 struct kvm_vcpu;
@@ -26,7 +26,7 @@ typedef void (*KVMWrite32BitValue)(struct kvm_vcpu *vcpu, u32 value);
 typedef void (*KVMWrite64BitValue)(struct kvm_vcpu *vcpu, u64 value);
 typedef bool (*KVMCheckCondition)(struct kvm_vcpu *vcpu);
 
-struct kvm_preemption_ops {
+struct rkvm_ops {
 	KVMSetFlag setup_preemption_timer;
 	KVMSetFlag save_preemption_timer_on_exit;
 	KVMRead32BitValue read_hw_intr_info;
@@ -40,31 +40,31 @@ struct kvm_preemption_ops {
 	KVMCheckCondition guest_halted;
 };
 
-#define KVM_PREEMPTION_DATA_SIZE 512
+#define RKVM_DATA_SIZE 512
 #define KVM_VCPU_PREEMPTION_DATA_SIZE 128
 
 extern bool kvm_enable_preemption_timer(struct kvm_vcpu *vcpu);
-extern bool kvm_preemption_on(struct kvm *kvm);
+extern bool rkvm_on(struct kvm *kvm);
 
 extern int kvm_init_preemption_data(struct kvm *kvm,
-				    struct kvm_preemption_ops *ops);
+				    struct rkvm_ops *ops);
 extern void kvm_destroy_preemption_data(struct kvm *kvm);
 
 extern void kvm_vcpu_uninit_preemption_data(struct kvm_vcpu *vcpu);
 
-extern void kvm_preemption_on_vmentry(struct kvm_vcpu *vcpu);
-extern void kvm_preemption_on_vmexit(struct kvm_vcpu *vcpu);
-extern void kvm_preemption_lock_vcpu(struct kvm_vcpu *vcpu);
-extern void kvm_preemption_unlock_vcpu(struct kvm_vcpu *vcpu);
-extern void kvm_preemption_vcpu_halted(struct kvm_vcpu *vcpu);
+extern void rkvm_on_vmentry(struct kvm_vcpu *vcpu);
+extern void rkvm_on_vmexit(struct kvm_vcpu *vcpu);
+extern void rkvm_lock_vcpu(struct kvm_vcpu *vcpu);
+extern void rkvm_unlock_vcpu(struct kvm_vcpu *vcpu);
+extern void rkvm_vcpu_halted(struct kvm_vcpu *vcpu);
 
-extern void kvm_preemption_userspace_entry(struct kvm *kvm,
+extern void rkvm_userspace_entry(struct kvm *kvm,
 					   struct kvm_userspace_preemption_data *out_userspace);
-extern void kvm_preemption_userspace_exit(struct kvm *kvm,
+extern void rkvm_userspace_exit(struct kvm *kvm,
 					  struct kvm_userspace_preemption_data *out_userspace);
-extern bool kvm_preemption_retrieve_rdtsc_value(struct kvm_vcpu *vcpu,
-						u64 *out_tsc_value,
-						bool *out_do_record);
+extern bool rkvm_retrieve_rdtsc_value(struct kvm_vcpu *vcpu,
+				      u64 *out_tsc_value,
+				      bool *out_do_record);
 
 extern int kvm_set_preemption_timer_quantum(struct kvm *kvm, u32 preemption_timer_quantum);
 extern int kvm_get_preemption_timer_quantum(struct kvm *kvm, u32 *preemption_timer_quantum);
