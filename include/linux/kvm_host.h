@@ -232,7 +232,7 @@ struct kvm_vcpu {
 
 	struct mutex mutex;
 	struct kvm_run *run;
-	u64 preemption_data[KVM_VCPU_PREEMPTION_DATA_SIZE / 8];
+	u64 rkvm_vcpu_data[(RKVM_VCPU_DATA_SIZE + 7) / 8];
 
 	int fpu_active;
 	int guest_fpu_loaded, guest_xcr0_loaded;
@@ -409,7 +409,7 @@ struct kvm {
 	long tlbs_dirty;
 	struct list_head devices;
 
-	u64 preemption_data[RKVM_DATA_SIZE / 8];
+	u64 rkvm_data[(RKVM_DATA_SIZE + 7) / 8];
 };
 
 #define kvm_err(fmt, ...) \

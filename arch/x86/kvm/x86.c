@@ -3832,18 +3832,18 @@ long kvm_arch_vm_ioctl(struct file *filp,
 		r = 0;
 		break;
 	}
-	case KVM_SET_PREEMPTION_TIMER_QUANTUM: {
+	case RKVM_SET_TIMER_QUANTUM: {
 		u32 preemption_timer_quantum;
 
 		r = -EFAULT;
 		if (copy_from_user(&preemption_timer_quantum, argp, sizeof preemption_timer_quantum))
 			goto out;
-		r = kvm_set_preemption_timer_quantum(kvm, preemption_timer_quantum);
+		r = rkvm_set_timer_quantum(kvm, preemption_timer_quantum);
 		break;
 	}
-	case KVM_GET_PREEMPTION_TIMER_QUANTUM: {
+	case RKVM_GET_TIMER_QUANTUM: {
 		u32 preemption_timer_quantum;
-		r = kvm_get_preemption_timer_quantum(kvm, &preemption_timer_quantum);
+		r = rkvm_get_timer_quantum(kvm, &preemption_timer_quantum);
 		if (r != 0)
 			goto out;
 		r = -EFAULT;
@@ -3851,27 +3851,27 @@ long kvm_arch_vm_ioctl(struct file *filp,
 			goto out;
 		r = 0;
 	}
-	case KVM_SET_EXECUTION_FLAG: {
+	case RKVM_SET_EXECUTION_FLAG: {
 		u32 execution_mode;
 
 		r = -EFAULT;
 		if (copy_from_user(&execution_mode, argp, sizeof execution_mode))
 			goto out;
-		r = kvm_set_execution_flag(kvm, execution_mode);
+		r = rkvm_set_execution_flag(kvm, execution_mode);
 		break;		
 	}
-	case KVM_CLEAR_EXECUTION_FLAG: {
+	case RKVM_CLEAR_EXECUTION_FLAG: {
 		u32 execution_mode;
 
 		r = -EFAULT;
 		if (copy_from_user(&execution_mode, argp, sizeof execution_mode))
 			goto out;
-		r = kvm_clear_execution_flag(kvm, execution_mode);
+		r = rkvm_clear_execution_flag(kvm, execution_mode);
 		break;		
 	}
-	case KVM_GET_EXECUTION_MODE: {
+	case RKVM_GET_EXECUTION_MODE: {
 		u32 execution_mode;
-		r = kvm_get_execution_mode(kvm, &execution_mode);
+		r = rkvm_get_execution_mode(kvm, &execution_mode);
 		if (r != 0)
 			goto out;
 		r = -EFAULT;
@@ -3881,20 +3881,20 @@ long kvm_arch_vm_ioctl(struct file *filp,
 		break;
 	}
 	case RKVM_USERSPACE_ENTRY: {
-		struct kvm_userspace_preemption_data preemption_data;
-		rkvm_userspace_entry(kvm, &preemption_data);
+		struct rkvm_userspace_data rkvm_us_data;
+		rkvm_userspace_entry(kvm, &rkvm_us_data);
 		r = -EFAULT;
-		if (copy_to_user(argp, &preemption_data, sizeof preemption_data))
+		if (copy_to_user(argp, &rkvm_us_data, sizeof rkvm_us_data))
 			goto out;
 		r = 0;
 		break;
 	}
 	case RKVM_USERSPACE_EXIT: {
-		struct kvm_userspace_preemption_data preemption_data;
+		struct rkvm_userspace_data rkvm_us_data;
 		r = -EFAULT;
-		if (copy_from_user(&preemption_data, argp, sizeof preemption_data))
+		if (copy_from_user(&rkvm_us_data, argp, sizeof rkvm_us_data))
 			goto out;
-		rkvm_userspace_exit(kvm, &preemption_data);
+		rkvm_userspace_exit(kvm, &rkvm_us_data);
 		r = 0;
 		break;
 	}
@@ -7021,7 +7021,7 @@ void kvm_arch_vcpu_uninit(struct kvm_vcpu *vcpu)
 {
 	int idx;
 
-	kvm_vcpu_uninit_preemption_data(vcpu);
+	rkvm_uninit(vcpu);
 	kvm_pmu_destroy(vcpu);
 	kfree(vcpu->arch.mce_banks);
 	kvm_free_lapic(vcpu);
@@ -7039,7 +7039,7 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 	if (type)
 		return -EINVAL;
 
-	r = kvm_init_preemption_data(kvm, kvm_x86_ops->rkvm_ops);
+	r = rkvm_init(kvm, kvm_x86_ops->rkvm_ops);
 	if (r < 0)
 		return r;
 
@@ -7119,7 +7119,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
 		mem.slot = TSS_PRIVATE_MEMSLOT;
 		kvm_set_memory_region(kvm, &mem);
 	}
-	kvm_destroy_preemption_data(kvm);
+	rkvm_destroy(kvm);
 	kvm_iommu_unmap_guest(kvm);
 	kfree(kvm->arch.vpic);
 	kfree(kvm->arch.vioapic);

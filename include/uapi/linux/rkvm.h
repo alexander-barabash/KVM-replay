@@ -3,7 +3,7 @@
 
 #include <linux/types.h>
 
-struct preemption_debug_data {
+struct rkvm_vcpu_debug_data {
 	__u64 accumulate_preemption_timer;
 	__u64 accumulate_retired_branch_counter;
 	__u64 reported_secs;
@@ -22,7 +22,7 @@ struct preemption_debug_data {
 	__u64 exit_counter;
 };
 
-struct kvm_userspace_preemption_data {
+struct rkvm_userspace_data {
 	__u64 accumulate_preemption_timer;
 	__u64 preemption_timer_back;
 	__u32 preemption_timer_quantum;
@@ -30,8 +30,8 @@ struct kvm_userspace_preemption_data {
 	__u32 locked;
 };
 
-#define KVM_EXECUTION_MODE_LOCKSTEP 1
-#define KVM_EXECUTION_MODE_RECORD (1 << 1)
-#define KVM_EXECUTION_MODE_REPLAY (1 << 2)
+#define RKVM_EXECUTION_MODE_LOCKSTEP 1
+#define RKVM_EXECUTION_MODE_RECORD (1 << 1)
+#define RKVM_EXECUTION_MODE_REPLAY (1 << 2)
 
 #endif

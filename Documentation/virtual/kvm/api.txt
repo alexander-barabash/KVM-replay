@@ -2381,7 +2381,7 @@ associated with the service will be forgotten, and subsequent RTAS
 calls by the guest for that service will be passed to userspace to be
 handled.
 
-4.86 KVM_SET_PREEMPTION_TIMER_QUANTUM
+4.86 RKVM_SET_TIMER_QUANTUM
 
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
@@ -2392,7 +2392,7 @@ Returns: 0 on success, negative value on failure
 Defines the value of preemption timer quantum.
 When set to zero, no preemption timer quantum is used.
 
-4.87 KVM_GET_PREEMPTION_TIMER_QUANTUM
+4.87 RKVM_GET_TIMER_QUANTUM
 
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
@@ -2402,7 +2402,7 @@ Returns: 0 on success, negative value on failure
 
 Returns the value of preemption timer quantum.
 
-4.88 KVM_SET_EXECUTION_FLAG
+4.88 RKVM_SET_EXECUTION_FLAG
 
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
@@ -2412,12 +2412,12 @@ Returns: 0 on success, negative value on failure
 
 Bit flags for execution_mode:
 
-#define KVM_EXECUTION_MODE_LOCKSTEP 1 /* Execute KVM CPUs in lockstep. */
-#define KVM_EXECUTION_MODE_RECORD (2 | KVM_EXECUTION_MODE_LOCKSTEP) /* Record while executing KVM CPUs. */
-#define KVM_EXECUTION_MODE_REPLAY (4 | KVM_EXECUTION_MODE_LOCKSTEP) /* Replay KVM CPUs. */
+#define RKVM_EXECUTION_MODE_LOCKSTEP 1 /* Execute KVM CPUs in lockstep. */
+#define RKVM_EXECUTION_MODE_RECORD (2 | RKVM_EXECUTION_MODE_LOCKSTEP) /* Record while executing KVM CPUs. */
+#define RKVM_EXECUTION_MODE_REPLAY (4 | RKVM_EXECUTION_MODE_LOCKSTEP) /* Replay KVM CPUs. */
 
 
-4.89 KVM_CLEAR_EXECUTION_FLAG
+4.89 RKVM_CLEAR_EXECUTION_FLAG
 
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
@@ -2425,7 +2425,7 @@ Type: vm ioctl
 Parameters: __u32 execution_mode
 Returns: 0 on success, negative value on failure
 
-4.90 KVM_GET_EXECUTION_MODE
+4.90 RKVM_GET_EXECUTION_MODE
 
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
@@ -2440,7 +2440,7 @@ Returns the value of KVM execution mode in the parameter.
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
 Type: vm ioctl
-Parameters: struct kvm_userspace_preemption_data (out)
+Parameters: struct rkvm_userspace_data (out)
 Returns: 0 on success, negative value on failure
 
 4.91 RKVM_USERSPACE_EXIT
@@ -2448,10 +2448,10 @@ Returns: 0 on success, negative value on failure
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
 Type: vm ioctl
-Parameters: struct kvm_userspace_preemption_data (in)
+Parameters: struct rkvm_userspace_data (in)
 Returns: 0 on success, negative value on failure
 
-4.92 KVM_OPEN_RECORD_STREAM
+4.92 RKVM_OPEN_RECORD_STREAM
 
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
@@ -2459,7 +2459,7 @@ Type: vcpu ioctl
 Parameters: None
 Returns: file descriptor number (>= 0) on success, -1 on error
 
-4.92 KVM_OPEN_REPLAY_STREAM
+4.92 RKVM_OPEN_REPLAY_STREAM
 
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86

@@ -11,7 +11,9 @@
 #include <linux/rkvm.h>
 
 struct kvm;
+typedef struct kvm rkvm_host;
 struct kvm_vcpu;
+typedef struct kvm_vcpu rkvm_vcpu_host;
 struct module;
 
 /* guest preemption timer supported? */
@@ -19,12 +21,12 @@ extern bool kvm_has_preemption_timer;
 /* guest preemption timer (logarithmic) rate */
 extern int kvm_preemption_timer_rate;
 
-typedef void (*KVMSetFlag)(struct kvm_vcpu *vcpu, bool on);
-typedef u64 (*KVMRead64BitValue)(struct kvm_vcpu *vcpu);
-typedef u32 (*KVMRead32BitValue)(struct kvm_vcpu *vcpu);
-typedef void (*KVMWrite32BitValue)(struct kvm_vcpu *vcpu, u32 value);
-typedef void (*KVMWrite64BitValue)(struct kvm_vcpu *vcpu, u64 value);
-typedef bool (*KVMCheckCondition)(struct kvm_vcpu *vcpu);
+typedef void (*KVMSetFlag)(rkvm_vcpu_host *vcpu, bool on);
+typedef u64 (*KVMRead64BitValue)(rkvm_vcpu_host *vcpu);
+typedef u32 (*KVMRead32BitValue)(rkvm_vcpu_host *vcpu);
+typedef void (*KVMWrite32BitValue)(rkvm_vcpu_host *vcpu, u32 value);
+typedef void (*KVMWrite64BitValue)(rkvm_vcpu_host *vcpu, u64 value);
+typedef bool (*KVMCheckCondition)(rkvm_vcpu_host *vcpu);
 
 struct rkvm_ops {
 	KVMSetFlag setup_preemption_timer;
@@ -41,44 +43,44 @@ struct rkvm_ops {
 };
 
 #define RKVM_DATA_SIZE 512
-#define KVM_VCPU_PREEMPTION_DATA_SIZE 128
+#define RKVM_VCPU_DATA_SIZE 128
 
-extern bool kvm_enable_preemption_timer(struct kvm_vcpu *vcpu);
-extern bool rkvm_on(struct kvm *kvm);
+extern bool kvm_enable_preemption_timer(rkvm_vcpu_host *vcpu);
+extern bool rkvm_on(rkvm_host *host);
 
-extern int kvm_init_preemption_data(struct kvm *kvm,
-				    struct rkvm_ops *ops);
-extern void kvm_destroy_preemption_data(struct kvm *kvm);
+extern int rkvm_init(rkvm_host *host,
+		     struct rkvm_ops *ops);
+extern void rkvm_destroy(rkvm_host *host);
 
-extern void kvm_vcpu_uninit_preemption_data(struct kvm_vcpu *vcpu);
+extern void rkvm_uninit(rkvm_vcpu_host *vcpu);
 
-extern void rkvm_on_vmentry(struct kvm_vcpu *vcpu);
-extern void rkvm_on_vmexit(struct kvm_vcpu *vcpu);
-extern void rkvm_lock_vcpu(struct kvm_vcpu *vcpu);
-extern void rkvm_unlock_vcpu(struct kvm_vcpu *vcpu);
-extern void rkvm_vcpu_halted(struct kvm_vcpu *vcpu);
+extern void rkvm_on_vmentry(rkvm_vcpu_host *vcpu);
+extern void rkvm_on_vmexit(rkvm_vcpu_host *vcpu);
+extern void rkvm_lock_vcpu(rkvm_vcpu_host *vcpu);
+extern void rkvm_unlock_vcpu(rkvm_vcpu_host *vcpu);
+extern void rkvm_vcpu_halted(rkvm_vcpu_host *vcpu);
 
-extern void rkvm_userspace_entry(struct kvm *kvm,
-					   struct kvm_userspace_preemption_data *out_userspace);
-extern void rkvm_userspace_exit(struct kvm *kvm,
-					  struct kvm_userspace_preemption_data *out_userspace);
-extern bool rkvm_retrieve_rdtsc_value(struct kvm_vcpu *vcpu,
+extern void rkvm_userspace_entry(rkvm_host *host,
+					   struct rkvm_userspace_data *out_userspace);
+extern void rkvm_userspace_exit(rkvm_host *host,
+					  struct rkvm_userspace_data *out_userspace);
+extern bool rkvm_retrieve_rdtsc_value(rkvm_vcpu_host *vcpu,
 				      u64 *out_tsc_value,
 				      bool *out_do_record);
 
-extern int kvm_set_preemption_timer_quantum(struct kvm *kvm, u32 preemption_timer_quantum);
-extern int kvm_get_preemption_timer_quantum(struct kvm *kvm, u32 *preemption_timer_quantum);
+extern int rkvm_set_timer_quantum(rkvm_host *host, u32 preemption_timer_quantum);
+extern int rkvm_get_timer_quantum(rkvm_host *host, u32 *preemption_timer_quantum);
 
-extern int kvm_on_preemption_timer_exit(struct kvm_vcpu *vcpu);
+extern int rkvm_on_preemption_timer_exit(rkvm_vcpu_host *vcpu);
 
-extern int kvm_set_execution_flag(struct kvm *kvm, u32 execution_mode);
-extern int kvm_clear_execution_flag(struct kvm *kvm, u32 execution_mode);
-extern int kvm_get_execution_mode(struct kvm *kvm, u32 *execution_mode);
+extern int rkvm_set_execution_flag(rkvm_host *host, u32 execution_mode);
+extern int rkvm_clear_execution_flag(rkvm_host *host, u32 execution_mode);
+extern int rkvm_get_execution_mode(rkvm_host *host, u32 *execution_mode);
 
-extern int kvm_open_record_stream(struct kvm_vcpu *vcpu);
-extern int kvm_open_replay_stream(struct kvm_vcpu *vcpu);
-extern void kvm_register_bstream_ops(struct module *module);
+extern int rkvm_open_record_stream(rkvm_vcpu_host *vcpu);
+extern int rkvm_open_replay_stream(rkvm_vcpu_host *vcpu);
+extern void rkvm_register_bstream_ops(struct module *module);
 
-extern void kvm_record_tsc(struct kvm_vcpu *vcpu, u64 tsc_value);
+extern void rkvm_record_tsc(rkvm_vcpu_host *vcpu, u64 tsc_value);
 
 #endif

@@ -5693,7 +5693,7 @@ static int handle_invalid_op(struct kvm_vcpu *vcpu)
 
 static int handle_preemption_timer_exit(struct kvm_vcpu *vcpu)
 {
-	int handled = kvm_on_preemption_timer_exit(vcpu);
+	int handled = rkvm_on_preemption_timer_exit(vcpu);
 	if (!handled)
 		vcpu->run->exit_reason = KVM_EXIT_PREEMPTION_TIMER;
 	return handled;
@@ -5720,7 +5720,7 @@ static inline void set_rdtsc_return_value(struct kvm_vcpu *vcpu, u64 tsc_value)
 
 static inline void set_rdtscp_aux_return_value(struct kvm_vcpu *vcpu)
 {
-	struct preemption_debug_data *debug = &vcpu->run->preemption_debug_data;
+	struct rkvm_vcpu_debug_data *debug = &vcpu->run->rkvm_vcpu_debug_data;
 
 	u64 tsc_aux = 0;
 	vmx_get_msr(vcpu, MSR_TSC_AUX, &tsc_aux);
@@ -5748,7 +5748,7 @@ static int handle_rdtsc_with_preemption(struct kvm_vcpu *vcpu)
 	set_rdtsc_return_value(vcpu, tsc_value);
 	skip_emulated_instruction(vcpu);
 	if (do_record)
-		kvm_record_tsc(vcpu, tsc_value);
+		rkvm_record_tsc(vcpu, tsc_value);
 	return 1;
 }
 
@@ -5764,7 +5764,7 @@ static int handle_rdtscp_with_preemption(struct kvm_vcpu *vcpu)
 	set_rdtsc_return_value(vcpu, tsc_value);
 	skip_emulated_instruction(vcpu);
 	if (do_record)
-		kvm_record_tsc(vcpu, tsc_value);
+		rkvm_record_tsc(vcpu, tsc_value);
 	return 1;
 }
 

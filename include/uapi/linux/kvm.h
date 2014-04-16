@@ -321,7 +321,7 @@ struct kvm_run {
 		char padding[1024];
 	} s;
 
-	struct preemption_debug_data preemption_debug_data;
+	struct rkvm_vcpu_debug_data rkvm_vcpu_debug_data;
 };
 
 /* for KVM_REGISTER_COALESCED_MMIO / KVM_UNREGISTER_COALESCED_MMIO */
@@ -1022,15 +1022,15 @@ struct kvm_s390_ucas_mapping {
 #define KVM_GET_REG_LIST	  _IOWR(KVMIO, 0xb0, struct kvm_reg_list)
 
 /* Available with KVM_CAP_PREEMPTION_TIMER */
-#define KVM_SET_PREEMPTION_TIMER_QUANTUM	_IOW(KVMIO,  0xc0, __u32)
-#define KVM_GET_PREEMPTION_TIMER_QUANTUM	_IOW(KVMIO,  0xc1, __u32)
-#define KVM_SET_EXECUTION_FLAG		_IOW(KVMIO,  0xc2, __u32)
-#define KVM_CLEAR_EXECUTION_FLAG	_IOW(KVMIO,  0xc3, __u32)
-#define KVM_GET_EXECUTION_MODE		_IOW(KVMIO,  0xc4, __u32)
-#define RKVM_USERSPACE_ENTRY	_IOW(KVMIO,  0xc5, struct kvm_userspace_preemption_data)
-#define RKVM_USERSPACE_EXIT	_IOW(KVMIO,  0xc6, struct kvm_userspace_preemption_data)
-#define KVM_OPEN_RECORD_STREAM		_IO(KVMIO, 0xca)
-#define KVM_OPEN_REPLAY_STREAM		_IO(KVMIO, 0xcb)
+#define RKVM_SET_TIMER_QUANTUM	_IOW(KVMIO,  0xc0, __u32)
+#define RKVM_GET_TIMER_QUANTUM	_IOW(KVMIO,  0xc1, __u32)
+#define RKVM_SET_EXECUTION_FLAG		_IOW(KVMIO,  0xc2, __u32)
+#define RKVM_CLEAR_EXECUTION_FLAG	_IOW(KVMIO,  0xc3, __u32)
+#define RKVM_GET_EXECUTION_MODE		_IOW(KVMIO,  0xc4, __u32)
+#define RKVM_USERSPACE_ENTRY	_IOW(KVMIO,  0xc5, struct rkvm_userspace_data)
+#define RKVM_USERSPACE_EXIT	_IOW(KVMIO,  0xc6, struct rkvm_userspace_data)
+#define RKVM_OPEN_RECORD_STREAM		_IO(KVMIO, 0xca)
+#define RKVM_OPEN_REPLAY_STREAM		_IO(KVMIO, 0xcb)
 
 
 #define KVM_DEV_ASSIGN_ENABLE_IOMMU	(1 << 0)

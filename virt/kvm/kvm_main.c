@@ -2153,11 +2153,11 @@ out_free1:
 		r = kvm_arch_vcpu_ioctl_set_fpu(vcpu, fpu);
 		break;
 	}
-	case KVM_OPEN_RECORD_STREAM:
-		r = kvm_open_record_stream(vcpu);
+	case RKVM_OPEN_RECORD_STREAM:
+		r = rkvm_open_record_stream(vcpu);
 		break;
-	case KVM_OPEN_REPLAY_STREAM:
-		r = kvm_open_replay_stream(vcpu);
+	case RKVM_OPEN_REPLAY_STREAM:
+		r = rkvm_open_replay_stream(vcpu);
 		break;
 	default:
 		r = kvm_arch_vcpu_ioctl(filp, ioctl, arg);
@@ -3253,7 +3253,7 @@ int kvm_init(void *opaque, unsigned vcpu_size, unsigned vcpu_align,
 	kvm_chardev_ops.owner = module;
 	kvm_vm_fops.owner = module;
 	kvm_vcpu_fops.owner = module;
-	kvm_register_bstream_ops(module);
+	rkvm_register_bstream_ops(module);
 
 	r = misc_register(&kvm_dev);
 	if (r) {
