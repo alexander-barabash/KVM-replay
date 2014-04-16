@@ -1,5 +1,5 @@
-#ifndef __LINUX_USER_KVM_PREEMPTION_H
-#define __LINUX_USER_KVM_PREEMPTION_H
+#ifndef __LINUX_USER_RKVM_H
+#define __LINUX_USER_RKVM_H
 
 #include <linux/types.h>
 

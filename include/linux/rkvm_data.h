@@ -1,5 +1,5 @@
-#ifndef __KVM_PREEMPTION_H
-#define __KVM_PREEMPTION_H
+#ifndef __RKVM_H
+#define __RKVM_H
 
 /*
  * This work is licensed under the terms of the GNU GPL, version 2.  See

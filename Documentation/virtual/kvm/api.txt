@@ -2435,7 +2435,7 @@ Returns: 0 on success, negative value on failure
 
 Returns the value of KVM execution mode in the parameter.
 
-4.91 KVM_PREEMPTION_USERSPACE_ENTRY
+4.91 RKVM_USERSPACE_ENTRY
 
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
@@ -2443,7 +2443,7 @@ Type: vm ioctl
 Parameters: struct kvm_userspace_preemption_data (out)
 Returns: 0 on success, negative value on failure
 
-4.91 KVM_PREEMPTION_USERSPACE_EXIT
+4.91 RKVM_USERSPACE_EXIT
 
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
