@@ -30,7 +30,7 @@
 #include <linux/kvm_para.h>
 
 #include <linux/kvm_types.h>
-#include <linux/rkvm_data.h>
+#include <linux/rkvm_host.h>
 
 #include <asm/kvm_host.h>
 

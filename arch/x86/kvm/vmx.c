@@ -21,7 +21,7 @@
 #include "cpuid.h"
 
 #include <linux/kvm_host.h>
-#include <linux/rkvm_data.h>
+#include <linux/rkvm_host.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -5740,31 +5740,21 @@ static inline void set_rdtscp_aux_return_value(struct kvm_vcpu *vcpu)
 static int handle_rdtsc_with_preemption(struct kvm_vcpu *vcpu)
 {
 	u64 tsc_value;
-	bool do_record;
-	if (!rkvm_retrieve_rdtsc_value(vcpu,
-						&tsc_value,
-						&do_record))
+	if (!rkvm_retrieve_rdtsc_value(vcpu, &tsc_value))
 		return 0;
 	set_rdtsc_return_value(vcpu, tsc_value);
 	skip_emulated_instruction(vcpu);
-	if (do_record)
-		rkvm_record_tsc(vcpu, tsc_value);
 	return 1;
 }
 
 static int handle_rdtscp_with_preemption(struct kvm_vcpu *vcpu)
 {
 	u64 tsc_value;
-	bool do_record;
-	if (!rkvm_retrieve_rdtsc_value(vcpu,
-						 &tsc_value,
-						 &do_record))
+	if (!rkvm_retrieve_rdtsc_value(vcpu, &tsc_value))
 		return 0;
 	set_rdtscp_aux_return_value(vcpu);
 	set_rdtsc_return_value(vcpu, tsc_value);
 	skip_emulated_instruction(vcpu);
-	if (do_record)
-		rkvm_record_tsc(vcpu, tsc_value);
 	return 1;
 }
 

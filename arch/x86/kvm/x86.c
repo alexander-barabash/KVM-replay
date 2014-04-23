@@ -20,6 +20,7 @@
  */
 
 #include <linux/kvm_host.h>
+#include <linux/rkvm_host.h>
 #include "irq.h"
 #include "mmu.h"
 #include "i8254.h"
@@ -2792,6 +2793,7 @@ static int kvm_vcpu_ioctl_interrupt(struct kvm_vcpu *vcpu,
 	if (irqchip_in_kernel(vcpu->kvm))
 		return -ENXIO;
 
+	rkvm_record_irq(vcpu, irq->irq);
 	kvm_queue_interrupt(vcpu, irq->irq, false);
 	kvm_make_request(KVM_REQ_EVENT, vcpu);
 
@@ -3832,75 +3834,13 @@ long kvm_arch_vm_ioctl(struct file *filp,
 		r = 0;
 		break;
 	}
-	case RKVM_SET_TIMER_QUANTUM: {
-		u32 preemption_timer_quantum;
-
-		r = -EFAULT;
-		if (copy_from_user(&preemption_timer_quantum, argp, sizeof preemption_timer_quantum))
-			goto out;
-		r = rkvm_set_timer_quantum(kvm, preemption_timer_quantum);
-		break;
-	}
-	case RKVM_GET_TIMER_QUANTUM: {
-		u32 preemption_timer_quantum;
-		r = rkvm_get_timer_quantum(kvm, &preemption_timer_quantum);
-		if (r != 0)
-			goto out;
-		r = -EFAULT;
-		if (copy_to_user(argp, &preemption_timer_quantum, sizeof preemption_timer_quantum))
-			goto out;
-		r = 0;
-	}
-	case RKVM_SET_EXECUTION_FLAG: {
-		u32 execution_mode;
-
-		r = -EFAULT;
-		if (copy_from_user(&execution_mode, argp, sizeof execution_mode))
-			goto out;
-		r = rkvm_set_execution_flag(kvm, execution_mode);
-		break;		
-	}
-	case RKVM_CLEAR_EXECUTION_FLAG: {
-		u32 execution_mode;
-
-		r = -EFAULT;
-		if (copy_from_user(&execution_mode, argp, sizeof execution_mode))
-			goto out;
-		r = rkvm_clear_execution_flag(kvm, execution_mode);
-		break;		
-	}
-	case RKVM_GET_EXECUTION_MODE: {
-		u32 execution_mode;
-		r = rkvm_get_execution_mode(kvm, &execution_mode);
-		if (r != 0)
-			goto out;
-		r = -EFAULT;
-		if (copy_to_user(argp, &execution_mode, sizeof execution_mode))
-			goto out;
-		r = 0;
-		break;
-	}
-	case RKVM_USERSPACE_ENTRY: {
-		struct rkvm_userspace_data rkvm_us_data;
-		rkvm_userspace_entry(kvm, &rkvm_us_data);
-		r = -EFAULT;
-		if (copy_to_user(argp, &rkvm_us_data, sizeof rkvm_us_data))
-			goto out;
-		r = 0;
-		break;
-	}
-	case RKVM_USERSPACE_EXIT: {
-		struct rkvm_userspace_data rkvm_us_data;
-		r = -EFAULT;
-		if (copy_from_user(&rkvm_us_data, argp, sizeof rkvm_us_data))
-			goto out;
-		rkvm_userspace_exit(kvm, &rkvm_us_data);
-		r = 0;
-		break;
-	}
 	
-	default:
-		;
+	default: {
+		bool handled;
+		long rkvm_result = rkvm_arch_vm_ioctl(kvm, ioctl, arg, &handled);
+		if (handled)
+			return rkvm_result;
+	}
 	}
 out:
 	return r;

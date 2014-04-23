@@ -1,8 +1,10 @@
-#include <linux/rkvm_data.h>
+#include <linux/rkvm_host.h>
 #include <linux/bscript.h>
 #include <linux/bstream.h>
 #include <linux/kvm_host.h>
 #include <linux/export.h>
+
+static void rkvm_record_tsc(rkvm_vcpu_host *vcpu, u64 tsc_value);
 
 #define RKVM_STATIC_CHECK(name, expr) \
 	u8 static_check_##name[(expr)? 1: -1] __attribute__((unused))
@@ -22,9 +24,9 @@ struct rkvm_data {
 	bool all_stopped;
 
 	bool use_preemption_timer;
-	bool execute_in_lockstep;
-	bool record_execution;
-	bool replay_execution;
+	bool lock_step;
+	bool record;
+	bool replay;
 
 	struct rkvm_userspace_data userspace;
 
@@ -138,10 +140,28 @@ rkvm_vcpu_running(struct rkvm_vcpu_data *vcpu_data)
 		!vcpu_data->vcpu_halted;
 }
 
-#define PREEMPTION_LOCKED(rkvm_data, ...) \
+#define RKVM_LOCKED_READ(rkvm_data, ...)			\
 	do {							\
 		spinlock_t *__spinlock;				\
-		__spinlock = &(rkvm_data)->spinlock;	\
+		__spinlock = &(rkvm_data)->spinlock;		\
+		spin_lock(__spinlock);				\
+		do { __VA_ARGS__; } while (0);			\
+		spin_unlock(__spinlock);			\
+	} while (0)
+
+#define RKVM_LOCKED_WRITE(rkvm_data, ...)			\
+	do {							\
+		spinlock_t *__spinlock;				\
+		__spinlock = &(rkvm_data)->spinlock;		\
+		spin_lock(__spinlock);				\
+		do { __VA_ARGS__; } while (0);			\
+		spin_unlock(__spinlock);			\
+	} while (0)
+
+#define RKVM_LOCKED(rkvm_data, ...)				\
+	do {							\
+		spinlock_t *__spinlock;				\
+		__spinlock = &(rkvm_data)->spinlock;		\
 		spin_lock(__spinlock);				\
 		do { __VA_ARGS__; } while (0);			\
 		spin_unlock(__spinlock);			\
@@ -152,15 +172,28 @@ static inline void update_rkvm_vcpu_debug_data(struct rkvm_vcpu_debug_data *debu
 					       struct rkvm_vcpu_data *vcpu_data,
 					       bool counted_exit)
 {
-	PREEMPTION_LOCKED(rkvm_data,
-			  debug->front = rkvm_data->preemption_timer_front;
-			  debug->back = rkvm_data->preemption_timer_back;
-			  debug->accumulate_preemption_timer = vcpu_data->accumulate_preemption_timer;
-			  debug->accumulate_retired_branch_counter = vcpu_data->accumulate_retired_branch_counter;
-			  debug->num_unhalted_vcpus = rkvm_data->num_unhalted_vcpus;
-			  debug->userspace_running = rkvm_data->userspace.running;
-			  debug->steal = rkvm_data->preemption_timer_steal;
-			  debug->exit_counter += counted_exit ? 1 : 0);
+	u64 preemption_timer_front;
+	u64 preemption_timer_back;
+	u64 preemption_timer_steal;
+	u16 num_unhalted_vcpus;
+	u32 userspace_running;
+
+	RKVM_LOCKED_READ(rkvm_data,
+			 preemption_timer_front = rkvm_data->preemption_timer_front;
+			 preemption_timer_back = rkvm_data->preemption_timer_back;
+			 num_unhalted_vcpus = rkvm_data->num_unhalted_vcpus;
+			 userspace_running = rkvm_data->userspace.running;
+			 preemption_timer_steal = rkvm_data->preemption_timer_steal);
+
+	debug->front = preemption_timer_front;
+	debug->back = preemption_timer_back;
+	debug->num_unhalted_vcpus = num_unhalted_vcpus;
+	debug->userspace_running = userspace_running;
+	debug->steal = preemption_timer_steal;
+
+	debug->accumulate_preemption_timer = vcpu_data->accumulate_preemption_timer;
+	debug->accumulate_retired_branch_counter = vcpu_data->accumulate_retired_branch_counter;
+	debug->exit_counter += counted_exit ? 1 : 0;
 }
 
 bool kvm_enable_preemption_timer(rkvm_vcpu_host *vcpu)
@@ -169,8 +202,8 @@ bool kvm_enable_preemption_timer(rkvm_vcpu_host *vcpu)
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	bool preemption_on;
 	if (kvm_has_preemption_timer) {
-		PREEMPTION_LOCKED(rkvm_data,
-				  preemption_on = (rkvm_data->replay_execution || rkvm_data->use_preemption_timer));
+		RKVM_LOCKED_READ(rkvm_data,
+				 preemption_on = (rkvm_data->replay || rkvm_data->use_preemption_timer));
 	} else {
 		preemption_on = false;
 	}
@@ -183,8 +216,8 @@ bool rkvm_on(rkvm_host *host)
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	bool preemption_on;
 	if (kvm_has_preemption_timer) {
-		PREEMPTION_LOCKED(rkvm_data,
-				  preemption_on = (rkvm_data->replay_execution || (rkvm_data->preemption_timer_quantum != 0)));
+		RKVM_LOCKED_READ(rkvm_data,
+				 preemption_on = (rkvm_data->replay || (rkvm_data->preemption_timer_quantum != 0)));
 	} else {
 		preemption_on = false;
 	}
@@ -266,8 +299,8 @@ void rkvm_lock_vcpu(rkvm_vcpu_host *vcpu)
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	bool need_lockstep_lock;
 
-	PREEMPTION_LOCKED(rkvm_data,
-			  need_lockstep_lock = rkvm_data->execute_in_lockstep);
+	RKVM_LOCKED_READ(rkvm_data,
+			 need_lockstep_lock = rkvm_data->lock_step);
 	if (need_lockstep_lock && !vcpu_data->vcpu_locked) {
 		spin_lock(&rkvm_data->lockstep_spinlock);
 		vcpu_data->vcpu_locked = true;
@@ -281,8 +314,7 @@ void rkvm_vcpu_halted(rkvm_vcpu_host *vcpu)
 	struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 
-	PREEMPTION_LOCKED(rkvm_data,
-			  vcpu_data->vcpu_halted = true);
+	RKVM_LOCKED_WRITE(rkvm_data, vcpu_data->vcpu_halted = true);
 }
 EXPORT_SYMBOL_GPL(rkvm_vcpu_halted);
 
@@ -318,13 +350,14 @@ rkvm_on_vmexit(rkvm_vcpu_host *vcpu)
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	struct rkvm_ops *ops = rkvm_data->ops;
 	struct bstream *record_bstream = get_record_bstream(vcpu);
-	u32 preemption_delta =
+	u64 accumulate_preemption_timer =
+		vcpu_data->accumulate_preemption_timer +
 		vcpu_data->entry_preemption_timer_value -
 		ops->read_preemption_timer_value(vcpu);
 	bool halted = ops->guest_halted(vcpu);
 
-	PREEMPTION_LOCKED(rkvm_data,
-			  vcpu_data->accumulate_preemption_timer += preemption_delta;
+	RKVM_LOCKED_WRITE(rkvm_data,
+			  vcpu_data->accumulate_preemption_timer = accumulate_preemption_timer;
 			  vcpu_data->vcpu_halted = halted);
 
 	if (record_bstream) {
@@ -363,49 +396,46 @@ void rkvm_destroy(rkvm_host *host)
 }
 EXPORT_SYMBOL_GPL(rkvm_destroy);
 
-static inline void
-update_preemption_parameters(struct rkvm_data *rkvm_data,
-			     u64 accumulate_preemption_timer,
-			     bool running)
-{
-	if(running) {
-		if (accumulate_preemption_timer < rkvm_data->preemption_timer_back) {
-			rkvm_data->preemption_timer_back = accumulate_preemption_timer;
-		}
-		rkvm_data->num_unhalted_vcpus++;
-	}
-	if (accumulate_preemption_timer > rkvm_data->preemption_timer_front) {
-		rkvm_data->preemption_timer_front = accumulate_preemption_timer;
-	}
-}
-
 static void rkvm_update(rkvm_host *host)
 {
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
-	struct rkvm_userspace_data *userspace = 
-		&rkvm_data->userspace;
+	struct rkvm_userspace_data *userspace = &rkvm_data->userspace;
 
 	int vcpu_index;
 	rkvm_vcpu_host *vcpu;
-	struct rkvm_vcpu_data *vcpu_data;
 
-	spin_lock(&rkvm_data->spinlock);
-	rkvm_data->preemption_timer_back = ~(u64)0;
-	rkvm_data->num_unhalted_vcpus = 0;
-	kvm_for_each_vcpu(vcpu_index, vcpu, host) {
-		vcpu_data = RKVM_VCPU_DATA(vcpu);
-		update_preemption_parameters(rkvm_data,
-					     vcpu_data->accumulate_preemption_timer,
-					     rkvm_vcpu_running(vcpu_data));
-	}
-	update_preemption_parameters(rkvm_data,
-				     userspace->accumulate_preemption_timer,
-				     userspace->running);
-	if(rkvm_data->num_unhalted_vcpus == 0) {
-		rkvm_data->all_stopped = 1;
-		rkvm_data->tsc_when_stopped = native_read_tsc();
-	}
-	spin_unlock(&rkvm_data->spinlock);
+	RKVM_LOCKED(rkvm_data,
+		    u64 preemption_timer_front = rkvm_data->preemption_timer_front;
+		    u64 preemption_timer_back = ~(u64)0;
+		    u16 num_unhalted_vcpus = 0;
+		    kvm_for_each_vcpu(vcpu_index, vcpu, host) {
+			    struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
+			    bool running = rkvm_vcpu_running(vcpu_data);
+			    u64 accumulate_preemption_timer = vcpu_data->accumulate_preemption_timer;
+			    if (running) {
+				    num_unhalted_vcpus++;
+				    preemption_timer_back =
+					    min(preemption_timer_back, accumulate_preemption_timer);
+			    }
+			    preemption_timer_front = max(preemption_timer_front, accumulate_preemption_timer);
+		    }
+		    {
+			    bool running = (userspace->running > 0);
+			    u64 accumulate_preemption_timer = userspace->accumulate_preemption_timer;
+			    if (running) {
+				    num_unhalted_vcpus++;
+				    preemption_timer_back =
+					    min(preemption_timer_back, accumulate_preemption_timer);
+			    }
+			    preemption_timer_front = max(preemption_timer_front, accumulate_preemption_timer);
+		    }
+		    if(num_unhalted_vcpus == 0) {
+			    rkvm_data->all_stopped = 1;
+			    rkvm_data->tsc_when_stopped = native_read_tsc();
+		    }
+		    rkvm_data->preemption_timer_back = preemption_timer_back;
+		    rkvm_data->preemption_timer_front = preemption_timer_front;
+		    rkvm_data->num_unhalted_vcpus = num_unhalted_vcpus);
 }
 
 void rkvm_on_vmentry(rkvm_vcpu_host *vcpu)
@@ -421,25 +451,24 @@ void rkvm_on_vmentry(rkvm_vcpu_host *vcpu)
 	u64 preemption_timer_horizon;
 	bool was_running = rkvm_vcpu_running(vcpu_data);
 
-	spin_lock(&rkvm_data->spinlock);
-	preemption_timer_quantum = rkvm_data->preemption_timer_quantum;
-	preemption_timer_horizon = rkvm_data->preemption_timer_back + preemption_timer_quantum;
-	vcpu_data->vcpu_launched = true;
-	vcpu_data->vcpu_halted = false;
-	if (!was_running) {
-		RKVM_VCPU_DEBUG_DATA(vcpu)->private_steal +=
-			rkvm_data->preemption_timer_front -
-			vcpu_data->accumulate_preemption_timer;
-		vcpu_data->accumulate_preemption_timer =
-			rkvm_data->preemption_timer_front;
-		rkvm_data->num_unhalted_vcpus++;
-		if(rkvm_data->all_stopped) {
-			rkvm_data->all_stopped = 0;
-			rkvm_data->preemption_timer_steal +=
-				preemption_timer_since_tsc(rkvm_data->tsc_when_stopped);
-		}
-	}
-	spin_unlock(&rkvm_data->spinlock);
+	RKVM_LOCKED(rkvm_data,
+		    preemption_timer_quantum = rkvm_data->preemption_timer_quantum;
+		    preemption_timer_horizon = rkvm_data->preemption_timer_back + preemption_timer_quantum;
+		    vcpu_data->vcpu_launched = true;
+		    vcpu_data->vcpu_halted = false;
+		    if (!was_running) {
+			    RKVM_VCPU_DEBUG_DATA(vcpu)->private_steal +=
+				    rkvm_data->preemption_timer_front -
+				    vcpu_data->accumulate_preemption_timer;
+			    vcpu_data->accumulate_preemption_timer =
+				    rkvm_data->preemption_timer_front;
+			    rkvm_data->num_unhalted_vcpus++;
+			    if(rkvm_data->all_stopped) {
+				    rkvm_data->all_stopped = 0;
+				    rkvm_data->preemption_timer_steal +=
+					    preemption_timer_since_tsc(rkvm_data->tsc_when_stopped);
+			    }
+		    });
 
 	if (get_replay_bstream(vcpu)) {
 		struct bstream *replay_bstream = get_replay_bstream(vcpu);
@@ -491,32 +520,31 @@ void rkvm_on_vmentry(rkvm_vcpu_host *vcpu)
 EXPORT_SYMBOL_GPL(rkvm_on_vmentry);
 
 void rkvm_userspace_entry(rkvm_host *host,
-				    struct rkvm_userspace_data *out_userspace)
+			  struct rkvm_userspace_data *out_userspace)
 {
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	struct rkvm_userspace_data *userspace = &rkvm_data->userspace;
 	bool need_lockstep_lock;
 
-	spin_lock(&rkvm_data->spinlock);
-	out_userspace->preemption_timer_quantum = rkvm_data->preemption_timer_quantum;
-	out_userspace->preemption_timer_back = rkvm_data->preemption_timer_back;
-	if (userspace->running == 0) {
-		need_lockstep_lock = rkvm_data->execute_in_lockstep;
-		userspace->accumulate_preemption_timer = rkvm_data->preemption_timer_front;
-		if(rkvm_data->all_stopped) {
-			rkvm_data->all_stopped = 0;
-			rkvm_data->preemption_timer_steal +=
-				preemption_timer_since_tsc(rkvm_data->tsc_when_stopped);
-		}
-	} else {
-		need_lockstep_lock = false;
-	}
-	if (need_lockstep_lock)
-		userspace->locked = 1;
-	userspace->running++;
-	out_userspace->running = userspace->running;
-	out_userspace->accumulate_preemption_timer = userspace->accumulate_preemption_timer;
-	spin_unlock(&rkvm_data->spinlock);
+	RKVM_LOCKED(rkvm_data,
+		    out_userspace->preemption_timer_quantum = rkvm_data->preemption_timer_quantum;
+		    out_userspace->preemption_timer_back = rkvm_data->preemption_timer_back;
+		    if (userspace->running == 0) {
+			    need_lockstep_lock = rkvm_data->lock_step;
+			    userspace->accumulate_preemption_timer = rkvm_data->preemption_timer_front;
+			    if(rkvm_data->all_stopped) {
+				    rkvm_data->all_stopped = 0;
+				    rkvm_data->preemption_timer_steal +=
+					    preemption_timer_since_tsc(rkvm_data->tsc_when_stopped);
+			    }
+		    } else {
+			    need_lockstep_lock = false;
+		    }
+		    if (need_lockstep_lock)
+			    userspace->locked = 1;
+		    userspace->running++;
+		    out_userspace->running = userspace->running;
+		    out_userspace->accumulate_preemption_timer = userspace->accumulate_preemption_timer);
 	/*
 	if (need_lockstep_lock)
 		spin_lock(&rkvm_data->lockstep_spinlock);
@@ -525,19 +553,19 @@ void rkvm_userspace_entry(rkvm_host *host,
 EXPORT_SYMBOL_GPL(rkvm_userspace_entry);
 
 void rkvm_userspace_exit(rkvm_host *host,
-				   struct rkvm_userspace_data *userspace_in)
+			 struct rkvm_userspace_data *userspace_in)
 {
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	struct rkvm_userspace_data *userspace = &rkvm_data->userspace;
+	u64 accumulate_preemption_timer = userspace_in->accumulate_preemption_timer;
 	bool need_lockstep_unlock;
-	spin_lock(&rkvm_data->spinlock);
-	if (userspace_in->accumulate_preemption_timer > userspace->accumulate_preemption_timer)
-		userspace->accumulate_preemption_timer = userspace_in->accumulate_preemption_timer;
-	userspace->running--;
-	need_lockstep_unlock = (userspace->running == 0) && userspace->locked;
-	if (need_lockstep_unlock)
-		userspace->locked = 0;
-	spin_unlock(&rkvm_data->spinlock);
+	RKVM_LOCKED(rkvm_data,
+		    if (accumulate_preemption_timer > userspace->accumulate_preemption_timer)
+			    userspace->accumulate_preemption_timer = accumulate_preemption_timer;
+		    userspace->running--;
+		    need_lockstep_unlock = (userspace->running == 0) && userspace->locked;
+		    if (need_lockstep_unlock)
+			    userspace->locked = 0);
 	/*
 	if (need_lockstep_unlock)
 		spin_unlock(&rkvm_data->lockstep_spinlock);
@@ -545,31 +573,30 @@ void rkvm_userspace_exit(rkvm_host *host,
 }
 EXPORT_SYMBOL_GPL(rkvm_userspace_exit);
 
-bool rkvm_retrieve_rdtsc_value(rkvm_vcpu_host *vcpu,
-					 u64 *out_tsc_value,
-					 bool *out_do_record)
+bool rkvm_retrieve_rdtsc_value(rkvm_vcpu_host *vcpu, u64 *out_tsc_value)
 {
 	rkvm_host *host = RKVM_HOST(vcpu);
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
 	bool retrieved;
 	bool do_record;
-	u64 preemption_timer_value;
-	spin_lock(&rkvm_data->spinlock);
-	if (rkvm_data->preemption_timer_quantum != 0) {
-		do_record = rkvm_data->record_execution;
+	u32 preemption_timer_quantum;
+	u64 preemption_timer_steal;
+
+	RKVM_LOCKED_READ(rkvm_data,
+			 preemption_timer_quantum = rkvm_data->preemption_timer_quantum;
+			 preemption_timer_steal = rkvm_data->preemption_timer_steal;
+			 do_record = rkvm_data->record);
+	if (preemption_timer_quantum != 0) {
+		u64 tsc_value = preemption_timer_to_tsc(preemption_timer_steal +
+							vcpu_data->accumulate_preemption_timer);
+		RKVM_VCPU_DEBUG_DATA(vcpu)->last_read_tsc = tsc_value;
+		if (do_record)
+			rkvm_record_tsc(vcpu, tsc_value);
+		*out_tsc_value = tsc_value;
 		retrieved = true;
-		preemption_timer_value =
-			rkvm_data->preemption_timer_steal +
-			vcpu_data->accumulate_preemption_timer;
-		*out_do_record = do_record;
 	} else {
 		retrieved = false;
-	}
-	spin_unlock(&rkvm_data->spinlock);
-	if (retrieved) {
-		*out_tsc_value = preemption_timer_to_tsc(preemption_timer_value);
-		RKVM_VCPU_DEBUG_DATA(vcpu)->last_read_tsc = *out_tsc_value;
 	}
 	return retrieved;
 }
@@ -584,34 +611,35 @@ int rkvm_set_timer_quantum(rkvm_host *host, u32 preemption_timer_quantum)
 	int ret;
 	bool use_preemption_timer;
 
-	spin_lock(&rkvm_data->spinlock);
-	if (preemption_timer_quantum == rkvm_data->preemption_timer_quantum) {
-		ret = 0;
-	} else if (preemption_timer_quantum == 0) {
-		ret = -EINVAL;
-	} else {
-		if(kvm_has_preemption_timer) {
-			ret = 0;
-			rkvm_data->preemption_timer_quantum = preemption_timer_quantum;
-			use_preemption_timer = (preemption_timer_quantum > 0);
-			rkvm_data->use_preemption_timer = use_preemption_timer;
-			kvm_for_each_vcpu(i, vcpu, host) {
-				(*ops->setup_preemption_timer)(vcpu, use_preemption_timer);
-			}
-		} else {
-			ret = -EINVAL;
-		}
-	}
-	spin_unlock(&rkvm_data->spinlock);
+	RKVM_LOCKED(rkvm_data,
+		    if (preemption_timer_quantum == rkvm_data->preemption_timer_quantum) {
+			    ret = 0;
+		    } else if (preemption_timer_quantum == 0) {
+			    ret = -EINVAL;
+		    } else {
+			    if(kvm_has_preemption_timer) {
+				    ret = 0;
+				    rkvm_data->preemption_timer_quantum = preemption_timer_quantum;
+				    use_preemption_timer = (preemption_timer_quantum > 0);
+				    rkvm_data->use_preemption_timer = use_preemption_timer;
+				    kvm_for_each_vcpu(i, vcpu, host) {
+					    (*ops->setup_preemption_timer)(vcpu, use_preemption_timer);
+				    }
+			    } else {
+				    ret = -EINVAL;
+			    }
+		    });
 	return ret;
 }
 EXPORT_SYMBOL_GPL(rkvm_set_timer_quantum);
 
-int rkvm_get_timer_quantum(rkvm_host *host, u32 *preemption_timer_quantum)
+int rkvm_get_timer_quantum(rkvm_host *host, u32 *out_preemption_timer_quantum)
 {
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
-	PREEMPTION_LOCKED(rkvm_data,
-			  *preemption_timer_quantum = rkvm_data->preemption_timer_quantum);
+	u32 preemption_timer_quantum;
+	RKVM_LOCKED_READ(rkvm_data,
+			 preemption_timer_quantum = rkvm_data->preemption_timer_quantum);
+	*out_preemption_timer_quantum = preemption_timer_quantum;
 	return 0;
 }
 EXPORT_SYMBOL_GPL(rkvm_get_timer_quantum);
@@ -638,54 +666,57 @@ static inline bool rkvm_execution_mode_valid(rkvm_host *host, u32 execution_mode
 	return (execution_mode & ~permitted_execution_modes) == 0;
 }
 
-int rkvm_set_execution_flag(rkvm_host *host, u32 execution_mode)
+static inline bool rkvm_flag_value_set(u32 flag, u32 value)
+{
+	return (flag & value) == value;
+}
+
+int rkvm_set_execution_flag(rkvm_host *host, u32 flag)
 {
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
-	bool execute_in_lockstep = ((execution_mode & RKVM_EXECUTION_MODE_LOCKSTEP) == RKVM_EXECUTION_MODE_LOCKSTEP);
-	bool record_execution = ((execution_mode & RKVM_EXECUTION_MODE_RECORD) == RKVM_EXECUTION_MODE_RECORD);
-	bool replay_execution = ((execution_mode & RKVM_EXECUTION_MODE_REPLAY) == RKVM_EXECUTION_MODE_REPLAY);
+	bool lock_step = rkvm_flag_value_set(flag, RKVM_EXECUTION_MODE_LOCKSTEP);
+	bool do_record = rkvm_flag_value_set(flag, RKVM_EXECUTION_MODE_RECORD);
+	bool do_replay = rkvm_flag_value_set(flag, RKVM_EXECUTION_MODE_REPLAY);
 
-	PREEMPTION_LOCKED(rkvm_data, {
-			rkvm_data->record_execution =
-				rkvm_data->record_execution || record_execution;
-			rkvm_data->replay_execution =
-				rkvm_data->replay_execution || replay_execution;
-			rkvm_data->execute_in_lockstep =
-				rkvm_data->record_execution || rkvm_data->replay_execution ||
-				rkvm_data->execute_in_lockstep || execute_in_lockstep;
-		});
+	RKVM_LOCKED(rkvm_data,
+		    rkvm_data->record = rkvm_data->record || do_record;
+		    rkvm_data->replay = rkvm_data->replay || do_replay;
+		    rkvm_data->lock_step = rkvm_data->lock_step || lock_step || do_record || do_replay);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(rkvm_set_execution_flag);
 
-int rkvm_clear_execution_flag(rkvm_host *host, u32 execution_mode)
+int rkvm_clear_execution_flag(rkvm_host *host, u32 flag)
 {
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
-	bool execute_in_lockstep = ((~execution_mode & RKVM_EXECUTION_MODE_LOCKSTEP) == RKVM_EXECUTION_MODE_LOCKSTEP);
-	bool record_execution = ((~execution_mode & RKVM_EXECUTION_MODE_RECORD) == RKVM_EXECUTION_MODE_RECORD);
-	bool replay_execution = ((~execution_mode & RKVM_EXECUTION_MODE_REPLAY) == RKVM_EXECUTION_MODE_REPLAY);
+	bool lock_step = rkvm_flag_value_set(~flag, RKVM_EXECUTION_MODE_LOCKSTEP);
+	bool do_record = rkvm_flag_value_set(~flag, RKVM_EXECUTION_MODE_RECORD);
+	bool do_replay = rkvm_flag_value_set(~flag, RKVM_EXECUTION_MODE_REPLAY);
 
-	PREEMPTION_LOCKED(rkvm_data, {
-			rkvm_data->record_execution =
-				rkvm_data->record_execution && record_execution;
-			rkvm_data->replay_execution =
-				rkvm_data->replay_execution && replay_execution;
-			rkvm_data->execute_in_lockstep =
-				(rkvm_data->record_execution || rkvm_data->replay_execution ||
-				 rkvm_data->execute_in_lockstep) && execute_in_lockstep;
-		});
+	RKVM_LOCKED(rkvm_data,
+		    rkvm_data->record = rkvm_data->record && do_record;
+		    rkvm_data->replay = rkvm_data->replay && do_replay;
+		    rkvm_data->lock_step = rkvm_data->lock_step && lock_step && !do_record && !do_replay);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(rkvm_clear_execution_flag);
 
-int rkvm_get_execution_mode(rkvm_host *host, u32 *execution_mode)
+int rkvm_get_execution_mode(rkvm_host *host, u32 *out_execution_mode)
 {
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
-	PREEMPTION_LOCKED(rkvm_data,
-			  *execution_mode =
-			  (rkvm_data->execute_in_lockstep ? RKVM_EXECUTION_MODE_LOCKSTEP : 0) |
-			  (rkvm_data->record_execution ? RKVM_EXECUTION_MODE_RECORD : 0) |
-			  (rkvm_data->replay_execution ? RKVM_EXECUTION_MODE_REPLAY : 0));
+	bool lock_step;
+	bool record;
+	bool replay;
+
+	RKVM_LOCKED_READ(rkvm_data,
+			 lock_step = rkvm_data->lock_step;
+			 record = rkvm_data->record;
+			 replay = rkvm_data->replay);
+
+	*out_execution_mode =
+		(lock_step ? RKVM_EXECUTION_MODE_LOCKSTEP : 0) |
+		(record ? RKVM_EXECUTION_MODE_RECORD : 0) |
+		(replay ? RKVM_EXECUTION_MODE_REPLAY : 0);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(rkvm_get_execution_mode);
@@ -720,14 +751,14 @@ static void rkvm_do_bstream_release(rkvm_vcpu_host *vcpu, struct rkvm_stream_dat
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	struct bstream *bstream;
 
-	PREEMPTION_LOCKED(rkvm_data,
-			  stream_data->bstream_use_count--;
-			  if (stream_data->bstream_use_count == 0) {
-				  bstream = stream_data->bstream;
-				  stream_data->bstream = NULL;
-			  } else {
-				  bstream = NULL;
-			  });
+	RKVM_LOCKED(rkvm_data,
+		    stream_data->bstream_use_count--;
+		    if (stream_data->bstream_use_count == 0) {
+			    bstream = stream_data->bstream;
+			    stream_data->bstream = NULL;
+		    } else {
+			    bstream = NULL;
+		    });
 	
 	if (bstream != NULL)
 		bstream_free(bstream);
@@ -742,18 +773,18 @@ static int rkvm_bstream_release(struct inode *inode, struct file *filp)
 		rkvm_host *host = RKVM_HOST(vcpu);
 		struct rkvm_data *rkvm_data = RKVM_DATA(host);
 		bool need_cleanup;
-		PREEMPTION_LOCKED(rkvm_data,
-				  if (stream_data->back_pointer) {
-					  if (*stream_data->back_pointer) {
-						  *stream_data->back_pointer = NULL;
-						  need_cleanup = true;
-					  } else {
-						  need_cleanup = false;
-					  }
-					  stream_data->back_pointer = NULL;
-				  } else {
-					  need_cleanup = false;
-				  });
+		RKVM_LOCKED(rkvm_data,
+			    if (stream_data->back_pointer) {
+				    if (*stream_data->back_pointer) {
+					    *stream_data->back_pointer = NULL;
+					    need_cleanup = true;
+				    } else {
+					    need_cleanup = false;
+				    }
+				    stream_data->back_pointer = NULL;
+			    } else {
+				    need_cleanup = false;
+			    });
 		if (need_cleanup)
 			rkvm_do_bstream_release(vcpu, stream_data);
 	}
@@ -767,15 +798,15 @@ static void rkvm_vcpu_uninit_bstream_data(rkvm_vcpu_host *vcpu, struct rkvm_stre
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	struct rkvm_stream_data *stream_data;
 	bool need_cleanup;
-	PREEMPTION_LOCKED(rkvm_data,
-			  stream_data = *back_pointer;
-			  *back_pointer = NULL;
-			  if (stream_data) {
-				  clear_rkvm_stream_data(stream_data);
-				  need_cleanup = true;
-			  } else {
-				  need_cleanup = false;
-			  });
+	RKVM_LOCKED(rkvm_data,
+		    stream_data = *back_pointer;
+		    *back_pointer = NULL;
+		    if (stream_data) {
+			    clear_rkvm_stream_data(stream_data);
+			    need_cleanup = true;
+		    } else {
+			    need_cleanup = false;
+		    });
 	if (need_cleanup)
 		rkvm_do_bstream_release(vcpu, stream_data);
 }
@@ -860,8 +891,95 @@ void rkvm_register_bstream_ops(struct module *module)
 }
 EXPORT_SYMBOL_GPL(rkvm_register_bstream_ops);
 
-void rkvm_record_tsc(rkvm_vcpu_host *vcpu, u64 tsc_value)
+static void rkvm_record_tsc(rkvm_vcpu_host *vcpu, u64 tsc_value)
 {
 	/* TODO */
 }
-EXPORT_SYMBOL_GPL(rkvm_record_tsc);
+
+void rkvm_record_irq(rkvm_vcpu_host *vcpu, u32 irq)
+{
+	/* TODO */
+}
+EXPORT_SYMBOL_GPL(rkvm_record_irq);
+
+long rkvm_arch_vm_ioctl(struct kvm *kvm,
+			unsigned int ioctl, unsigned long arg, bool *phandled)
+{
+	void __user *argp = (void __user *)arg;
+	int r = -ENOTTY;
+	switch (ioctl) {
+	default:
+		*phandled = false;
+		return r;
+	case RKVM_SET_TIMER_QUANTUM: {
+		u32 preemption_timer_quantum;
+		
+		r = -EFAULT;
+		if (copy_from_user(&preemption_timer_quantum, argp, sizeof preemption_timer_quantum))
+			goto out;
+		r = rkvm_set_timer_quantum(kvm, preemption_timer_quantum);
+		break;
+	}
+	case RKVM_GET_TIMER_QUANTUM: {
+		u32 preemption_timer_quantum;
+		r = rkvm_get_timer_quantum(kvm, &preemption_timer_quantum);
+		if (r != 0)
+			goto out;
+		r = -EFAULT;
+		if (copy_to_user(argp, &preemption_timer_quantum, sizeof preemption_timer_quantum))
+			goto out;
+		r = 0;
+	}
+	case RKVM_SET_EXECUTION_FLAG: {
+		u32 execution_mode;
+
+		r = -EFAULT;
+		if (copy_from_user(&execution_mode, argp, sizeof execution_mode))
+			goto out;
+		r = rkvm_set_execution_flag(kvm, execution_mode);
+		break;		
+	}
+	case RKVM_CLEAR_EXECUTION_FLAG: {
+		u32 execution_mode;
+
+		r = -EFAULT;
+		if (copy_from_user(&execution_mode, argp, sizeof execution_mode))
+			goto out;
+		r = rkvm_clear_execution_flag(kvm, execution_mode);
+		break;		
+	}
+	case RKVM_GET_EXECUTION_MODE: {
+		u32 execution_mode;
+		r = rkvm_get_execution_mode(kvm, &execution_mode);
+		if (r != 0)
+			goto out;
+		r = -EFAULT;
+		if (copy_to_user(argp, &execution_mode, sizeof execution_mode))
+			goto out;
+		r = 0;
+		break;
+	}
+	case RKVM_USERSPACE_ENTRY: {
+		struct rkvm_userspace_data rkvm_us_data;
+		rkvm_userspace_entry(kvm, &rkvm_us_data);
+		r = -EFAULT;
+		if (copy_to_user(argp, &rkvm_us_data, sizeof rkvm_us_data))
+			goto out;
+		r = 0;
+		break;
+	}
+	case RKVM_USERSPACE_EXIT: {
+		struct rkvm_userspace_data rkvm_us_data;
+		r = -EFAULT;
+		if (copy_from_user(&rkvm_us_data, argp, sizeof rkvm_us_data))
+			goto out;
+		rkvm_userspace_exit(kvm, &rkvm_us_data);
+		r = 0;
+		break;
+	}
+	}
+ out:
+	*phandled = true;
+	return r;
+}
+EXPORT_SYMBOL_GPL(rkvm_arch_vm_ioctl);

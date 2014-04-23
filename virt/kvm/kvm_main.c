@@ -1,6 +1,3 @@
-#include "rkvm.c"
-#include "bstream.c"
-#include "bscript.c"
 /*
  * Kernel-based Virtual Machine driver for Linux
  *

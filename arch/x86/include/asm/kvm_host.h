@@ -21,7 +21,7 @@
 #include <linux/kvm.h>
 #include <linux/kvm_para.h>
 #include <linux/kvm_types.h>
-#include <linux/rkvm_data.h>
+#include <linux/rkvm_host.h>
 #include <linux/perf_event.h>
 #include <linux/pvclock_gtod.h>
 #include <linux/clocksource.h>

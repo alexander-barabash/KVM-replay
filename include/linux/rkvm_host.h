@@ -1,5 +1,5 @@
-#ifndef __RKVM_H
-#define __RKVM_H
+#ifndef __RKVM_HOST_H
+#define __RKVM_HOST_H
 
 /*
  * This work is licensed under the terms of the GNU GPL, version 2.  See
@@ -61,12 +61,10 @@ extern void rkvm_unlock_vcpu(rkvm_vcpu_host *vcpu);
 extern void rkvm_vcpu_halted(rkvm_vcpu_host *vcpu);
 
 extern void rkvm_userspace_entry(rkvm_host *host,
-					   struct rkvm_userspace_data *out_userspace);
+				 struct rkvm_userspace_data *out_userspace);
 extern void rkvm_userspace_exit(rkvm_host *host,
-					  struct rkvm_userspace_data *out_userspace);
-extern bool rkvm_retrieve_rdtsc_value(rkvm_vcpu_host *vcpu,
-				      u64 *out_tsc_value,
-				      bool *out_do_record);
+				struct rkvm_userspace_data *out_userspace);
+extern bool rkvm_retrieve_rdtsc_value(rkvm_vcpu_host *vcpu, u64 *out_tsc_value);
 
 extern int rkvm_set_timer_quantum(rkvm_host *host, u32 preemption_timer_quantum);
 extern int rkvm_get_timer_quantum(rkvm_host *host, u32 *preemption_timer_quantum);
@@ -81,6 +79,9 @@ extern int rkvm_open_record_stream(rkvm_vcpu_host *vcpu);
 extern int rkvm_open_replay_stream(rkvm_vcpu_host *vcpu);
 extern void rkvm_register_bstream_ops(struct module *module);
 
-extern void rkvm_record_tsc(rkvm_vcpu_host *vcpu, u64 tsc_value);
+extern void rkvm_record_irq(rkvm_vcpu_host *vcpu, u32 irq);
+
+extern long rkvm_arch_vm_ioctl(rkvm_host *host,
+			       unsigned int ioctl, unsigned long arg, bool *phandled);
 
 #endif
