@@ -173,6 +173,7 @@ struct kvm_pit_config {
 #define KVM_EXIT_S390_TSCH        22
 #define KVM_EXIT_EPR              23
 #define KVM_EXIT_PREEMPTION_TIMER 24
+#define KVM_EXIT_RKVM	          25
 
 /* For KVM_EXIT_INTERNAL_ERROR */
 /* Emulate instruction failed. */
@@ -1031,6 +1032,8 @@ struct kvm_s390_ucas_mapping {
 #define RKVM_USERSPACE_EXIT	_IOW(KVMIO,  0xc6, struct rkvm_userspace_data)
 #define RKVM_OPEN_RECORD_STREAM		_IO(KVMIO, 0xca)
 #define RKVM_OPEN_REPLAY_STREAM		_IO(KVMIO, 0xcb)
+#define RKVM_OPEN_TSC_RECORD_STREAM	_IO(KVMIO, 0xcc)
+#define RKVM_OPEN_TSC_REPLAY_STREAM	_IO(KVMIO, 0xcd)
 
 
 #define KVM_DEV_ASSIGN_ENABLE_IOMMU	(1 << 0)
