@@ -1,5 +1,10 @@
 #include <linux/bscript.h>
+#ifndef COMPILE_USERSPACE
 #include <linux/export.h>
+#else
+#include <string.h>
+#define EXPORT_SYMBOL_GPL(...)
+#endif
 
 static u64 HIGHEST_BYTE_MASK_FOR_U64 = ((u64)0xFFU << (64 - 8));
 static u8 NULL_MARKER = 0x80U;

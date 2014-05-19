@@ -1,9 +1,24 @@
 #ifndef __BSCRIPT_H
 #define __BSCRIPT_H
 
+#ifndef COMPILE_USERSPACE
 #include <linux/types.h>
-#include <linux/bstream.h>
+#else
+#include <stdint.h>
+#include <stdbool.h>
+typedef uint64_t u64;
+typedef uint32_t u32;
+typedef uint16_t u16;
+typedef uint8_t u8;
+typedef int64_t s64;
+typedef int32_t s32;
+typedef int16_t s16;
+typedef int8_t s8;
+#endif
 
+
+#ifndef COMPILE_USERSPACE
+#include <linux/bstream.h>
 static inline bool bscript_write_raw_data(struct bstream *bstream, const void *data, u32 size)
 {
 	return bstream_kernel_write_unlocked(bstream, data, size) == size;
@@ -12,6 +27,11 @@ static inline bool bscript_read_raw_data(struct bstream *bstream, void *data, u3
 {
 	return bstream_kernel_read_unlocked(bstream, data, size) == size;
 }
+#else
+struct bstream;
+extern bool bscript_write_raw_data(struct bstream *bstream, const void *data, u32 size);
+extern bool bscript_read_raw_data(struct bstream *bstream, void *data, u32 size);
+#endif
 
 static inline bool bscript_write_u8(struct bstream *bstream, u8 c)
 {
