@@ -314,7 +314,6 @@ ssize_t bstream_write_unlocked(struct bstream *bstream,
 		} else {
 			bstream_page = bstream_goto_next_write_page(bstream);
 			if (bstream_page == NULL) {
-				err = -ENOMEM;
 				break;
 			}
 			if (bstream_page->page == 0) {
