@@ -36,5 +36,21 @@ void bstream_file_data_release(struct bstream_file_data *stream_data)
 	}
 }
 
+extern int create_bstream_file(const char *name, int permission,
+			       u32 num_pages, u32 page_size_order,
+			       atomic_long_t *back_pointer);
+/*
+ * Allocates an inode.
+ */
+extern int open_bstream_file(const char *name, int permission,
+			     u32 num_pages, u32 page_size_order,
+			     atomic_long_t *back_pointer);
+extern void close_bstream_file(atomic_long_t *back_pointer);
+
+static inline
+struct bstream_file_data *get_bstream_file_data(atomic_long_t *back_pointer)
+{
+	return (struct bstream_file_data *)atomic_long_read(back_pointer);
+}
 
 #endif

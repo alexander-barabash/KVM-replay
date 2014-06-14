@@ -4200,6 +4200,7 @@ mmio:
 	/*
 	 * Is this MMIO handled locally?
 	 */
+	/* TODO: rkvm */
 	handled = ops->read_write_mmio(vcpu, gpa, bytes, val);
 	if (handled == bytes)
 		return X86EMUL_CONTINUE;
@@ -4415,7 +4416,8 @@ static int emulator_pio_in_emulated(struct x86_emulate_ctxt *ctxt,
 	ret = emulator_pio_in_out(vcpu, size, port, val, count, true);
 	if (ret) {
 data_avail:
-		memcpy(val, vcpu->arch.pio_data, size * count);
+		if (rkvm_on_pio_in_data_avail(vcpu, val, vcpu->arch.pio_data, size * count))
+			memcpy(val, vcpu->arch.pio_data, size * count);
 		vcpu->arch.pio.count = 0;
 		return 1;
 	}
@@ -6030,6 +6032,12 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 		kvm_lapic_sync_from_vapic(vcpu);
 
 	r = kvm_x86_ops->handle_exit(vcpu);
+	rkvm_on_update_vmexit_state(vcpu);
+
+	if ((r > 0) && rkvm_must_exit(vcpu)) {
+		r = 0;
+		vcpu->run->exit_reason = KVM_EXIT_RKVM;
+	}
 	return r;
 
 cancel_injection:
@@ -6037,6 +6045,11 @@ cancel_injection:
 	if (unlikely(vcpu->arch.apic_attention))
 		kvm_lapic_sync_from_vapic(vcpu);
 out:
+
+	if ((r > 0) && rkvm_must_exit(vcpu)) {
+		r = 0;
+		vcpu->run->exit_reason = KVM_EXIT_RKVM;
+	}
 	return r;
 }
 
@@ -6047,26 +6060,31 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 	struct kvm *kvm = vcpu->kvm;
 
 	vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
-	rkvm_lock_vcpu(vcpu);
 	r = vapic_enter(vcpu);
 	if (r) {
-		rkvm_unlock_vcpu(vcpu);
 		srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 		return r;
+	}
+
+	if (!rkvm_on_vcpu_entry(vcpu)) {
+		vcpu->run->exit_reason = KVM_EXIT_RKVM;
+		srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
+		return 0;
 	}
 
 	r = 1;
 	while (r > 0) {
 		if (vcpu->arch.mp_state == KVM_MP_STATE_RUNNABLE &&
-		    !vcpu->arch.apf.halted)
-			r = vcpu_enter_guest(vcpu);
-		else {
+		    !vcpu->arch.apf.halted) {
+			//do {
+				r = vcpu_enter_guest(vcpu);
+				//} while ((r > 0) && !rkvm_can_reschedule(vcpu));
+		} else {
 			rkvm_vcpu_halted(vcpu);
-			rkvm_unlock_vcpu(vcpu);
+			rkvm_on_vcpu_exit(vcpu, true);
 			srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 			kvm_vcpu_block(vcpu);
 			vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
-			rkvm_lock_vcpu(vcpu);
 			if (kvm_check_request(KVM_REQ_UNHALT, vcpu)) {
 				kvm_apic_accept_events(vcpu);
 				switch(vcpu->arch.mp_state) {
@@ -6082,6 +6100,11 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 					r = -EINTR;
 					break;
 				}
+			}
+			if ((r > 0) && !rkvm_on_vcpu_entry(vcpu)) {
+				r = 0;
+				vcpu->run->exit_reason = KVM_EXIT_RKVM;
+				break;
 			}
 		}
 
@@ -6105,16 +6128,20 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 			vcpu->run->exit_reason = KVM_EXIT_INTR;
 			++vcpu->stat.signal_exits;
 		}
-		if (need_resched()) {
-			rkvm_unlock_vcpu(vcpu);
+		if (need_resched() && rkvm_can_reschedule(vcpu)) {
+			rkvm_on_vcpu_exit(vcpu, true);
 			srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 			kvm_resched(vcpu);
 			vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
-			rkvm_lock_vcpu(vcpu);
+			if ((r > 0) && !rkvm_on_vcpu_entry(vcpu)) {
+				r = 0;
+				vcpu->run->exit_reason = KVM_EXIT_RKVM;
+				break;
+			}
 		}
 	}
 
-	rkvm_unlock_vcpu(vcpu);
+	rkvm_on_vcpu_exit(vcpu, false);
 	srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 
 	vapic_exit(vcpu);
@@ -6937,12 +6964,18 @@ int kvm_arch_vcpu_init(struct kvm_vcpu *vcpu)
 	if (r)
 		goto fail_free_wbinvd_dirty_mask;
 
+	r = rkvm_vcpu_init(vcpu);
+	if (r)
+		goto fail_free_fx;
+
 	vcpu->arch.ia32_tsc_adjust_msr = 0x0;
 	vcpu->arch.pv_time_enabled = false;
 	kvm_async_pf_hash_reset(vcpu);
 	kvm_pmu_init(vcpu);
 
 	return 0;
+fail_free_fx:
+	fx_free(vcpu);
 fail_free_wbinvd_dirty_mask:
 	free_cpumask_var(vcpu->arch.wbinvd_dirty_mask);
 fail_free_mce_banks:
@@ -6961,7 +6994,7 @@ void kvm_arch_vcpu_uninit(struct kvm_vcpu *vcpu)
 {
 	int idx;
 
-	rkvm_uninit(vcpu);
+	rkvm_vcpu_uninit(vcpu);
 	kvm_pmu_destroy(vcpu);
 	kfree(vcpu->arch.mce_banks);
 	kvm_free_lapic(vcpu);

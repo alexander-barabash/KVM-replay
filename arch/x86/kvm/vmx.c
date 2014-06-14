@@ -51,6 +51,12 @@
 #define DEBUGCTLMSR_FREEZE_PERFMON_ON_PMI (1UL << 12)
 #endif
 
+#ifndef DEBUGCTLMSR_FREEZE_WHILE_SMM_EN
+#define DEBUGCTLMSR_FREEZE_WHILE_SMM_EN (1UL << 14)
+#endif
+
+static struct rkvm_local_ops rkvm_local_ops;
+
 #define __ex(x) __kvm_handle_fault_on_reboot(x)
 #define __ex_clear(x, reg) \
 	____kvm_handle_fault_on_reboot(x, "xor " reg " , " reg)
@@ -2872,8 +2878,7 @@ static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
 	      CPU_BASED_MWAIT_EXITING |
 	      CPU_BASED_MONITOR_EXITING |
 	      CPU_BASED_INVLPG_EXITING |
-	      CPU_BASED_RDPMC_EXITING |
-		CPU_BASED_RDTSC_EXITING;
+	      CPU_BASED_RDPMC_EXITING;
 
 	opt = CPU_BASED_TPR_SHADOW |
 	      CPU_BASED_USE_MSR_BITMAPS |
@@ -4358,7 +4363,7 @@ static u32 vmx_exec_control(struct vcpu_vmx *vmx)
 static u32 vmx_secondary_exec_control(struct vcpu_vmx *vmx)
 {
 	u32 exec_control = vmcs_config.cpu_based_2nd_exec_ctrl;
-	if (rkvm_on(vmx->vcpu.kvm))
+	if (rkvm_recording_or_replaying(vmx->vcpu.kvm))
 		exec_control |=
 			(vmcs_config.opt_cpu_based_2nd_exec_ctrl & SECONDARY_EXEC_RDTSCP);
 	if (!vm_need_virtualize_apic_accesses(vmx->vcpu.kvm))
@@ -4664,6 +4669,8 @@ static void vmx_inject_irq(struct kvm_vcpu *vcpu)
 		int inc_eip = 0;
 		if (vcpu->arch.interrupt.soft)
 			inc_eip = vcpu->arch.event_exit_inst_len;
+		else if (!rkvm_before_inject_rmod_irq(vcpu, irq))
+			return;
 		if (kvm_inject_realmode_interrupt(vcpu, irq, inc_eip) != EMULATE_DONE)
 			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
 		return;
@@ -4673,8 +4680,11 @@ static void vmx_inject_irq(struct kvm_vcpu *vcpu)
 		intr |= INTR_TYPE_SOFT_INTR;
 		vmcs_write32(VM_ENTRY_INSTRUCTION_LEN,
 			     vmx->vcpu.arch.event_exit_inst_len);
-	} else
+	} else {
+		if (!rkvm_after_inject_irq(vcpu, irq))
+			return;
 		intr |= INTR_TYPE_EXT_INTR;
+	}
 	vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, intr);
 }
 
@@ -4997,6 +5007,7 @@ static int handle_exception(struct kvm_vcpu *vcpu)
 static int handle_external_interrupt(struct kvm_vcpu *vcpu)
 {
 	++vcpu->stat.irq_exits;
+	rkvm_handle_external_interrupt(vcpu);
 	return 1;
 }
 
@@ -5248,6 +5259,12 @@ static int handle_rdmsr(struct kvm_vcpu *vcpu)
 	u32 ecx = vcpu->arch.regs[VCPU_REGS_RCX];
 	u64 data;
 
+	if (!rkvm_guest_reg_available(vcpu->kvm, ecx)) {
+		trace_kvm_msr_read_ex(ecx);
+		kvm_inject_gp(vcpu, 0);
+		return 1;
+	}
+
 	if (vmx_get_msr(vcpu, ecx, &data)) {
 		trace_kvm_msr_read_ex(ecx);
 		kvm_inject_gp(vcpu, 0);
@@ -5269,6 +5286,12 @@ static int handle_wrmsr(struct kvm_vcpu *vcpu)
 	u32 ecx = vcpu->arch.regs[VCPU_REGS_RCX];
 	u64 data = (vcpu->arch.regs[VCPU_REGS_RAX] & -1u)
 		| ((u64)(vcpu->arch.regs[VCPU_REGS_RDX] & -1u) << 32);
+
+	if (!rkvm_guest_reg_available(vcpu->kvm, ecx)) {
+		trace_kvm_msr_write_ex(ecx, data);
+		kvm_inject_gp(vcpu, 0);
+		return 1;
+	}
 
 	msr.data = data;
 	msr.index = ecx;
@@ -5319,6 +5342,8 @@ static int handle_interrupt_window(struct kvm_vcpu *vcpu)
 static int handle_halt(struct kvm_vcpu *vcpu)
 {
 	skip_emulated_instruction(vcpu);
+	if (rkvm_handle_halt(vcpu))
+		return 1;
 	return kvm_emulate_halt(vcpu);
 }
 
@@ -5346,6 +5371,13 @@ static int handle_invlpg(struct kvm_vcpu *vcpu)
 static int handle_rdpmc(struct kvm_vcpu *vcpu)
 {
 	int err;
+	u32 ecx = vcpu->arch.regs[VCPU_REGS_RCX];
+
+	if (!rkvm_guest_reg_available(vcpu->kvm, ecx)) {
+		trace_kvm_msr_read_ex(ecx);
+		kvm_inject_gp(vcpu, 0);
+		return 1;
+	}
 
 	err = kvm_rdpmc(vcpu);
 	kvm_complete_insn_gp(vcpu, err);
@@ -5737,35 +5769,40 @@ static inline void set_rdtscp_aux_return_value(struct kvm_vcpu *vcpu)
 	debug->tscp_counter++;
 }
 
-static int handle_rdtsc_with_preemption(struct kvm_vcpu *vcpu)
-{
-	u64 tsc_value;
-	if (!rkvm_retrieve_rdtsc_value(vcpu, &tsc_value))
-		return 0;
-	set_rdtsc_return_value(vcpu, tsc_value);
-	skip_emulated_instruction(vcpu);
-	return 1;
-}
-
-static int handle_rdtscp_with_preemption(struct kvm_vcpu *vcpu)
-{
-	u64 tsc_value;
-	if (!rkvm_retrieve_rdtsc_value(vcpu, &tsc_value))
-		return 0;
-	set_rdtscp_aux_return_value(vcpu);
-	set_rdtsc_return_value(vcpu, tsc_value);
-	skip_emulated_instruction(vcpu);
-	return 1;
-}
-
 static int handle_rdtsc(struct kvm_vcpu *vcpu)
 {
-	return handle_rdtsc_with_preemption(vcpu);
+	bool handled = false;
+	u64 tsc_value;
+	if (rkvm_replaying(vcpu->kvm))
+		handled = rkvm_replay_tsc(vcpu, &tsc_value);
+	if (!handled) {
+		if (rkvm_preempting(vcpu->kvm)) {
+			handled = rkvm_retrieve_preemption_tsc(vcpu, &tsc_value);
+		} else {
+			tsc_value = guest_read_tsc();
+			handled = true;
+		}
+	}
+	if (!handled)
+		return 0;
+	if (rkvm_recording(vcpu->kvm))
+		rkvm_record_tsc(vcpu, tsc_value);
+	set_rdtsc_return_value(vcpu, tsc_value);
+	skip_emulated_instruction(vcpu);
+	return 1;
 }
 
 static int handle_rdtscp(struct kvm_vcpu *vcpu)
 {
-	return handle_rdtscp_with_preemption(vcpu);
+	if (!handle_rdtsc(vcpu))
+		return 0;
+	set_rdtscp_aux_return_value(vcpu);
+	return 1;
+}
+
+static int handle_mtf(struct kvm_vcpu *vcpu)
+{
+	return 1;
 }
 
 /*
@@ -6585,6 +6622,7 @@ static int (*const kvm_vmx_exit_handlers[])(struct kvm_vcpu *vcpu) = {
 	[EXIT_REASON_PREEMPTION_TIMER]        = handle_preemption_timer_exit,
 	[EXIT_REASON_RDTSC]                   = handle_rdtsc,
 	[EXIT_REASON_RDTSCP]                  = handle_rdtscp,
+	[EXIT_REASON_MTF]                     = handle_mtf,
 };
 
 static const int kvm_vmx_max_exit_handlers =
@@ -7260,12 +7298,27 @@ static void add_guest_kept_msr(struct vcpu_vmx *vmx, unsigned msr, u64 initial_v
 
 	rdmsrl_safe(msr, &current_value);
 
+	add_guest_load_msr_generic(vmx, msr, read_guest_store_msr(vmx, msr, initial_value));
+	add_guest_store_msr_generic(vmx, msr);
+
+	add_host_load_msr_generic(vmx, msr, current_value);
+}
+
+static void add_guest_override_msr(struct vcpu_vmx *vmx, unsigned msr, u64 guest_value)
+{
+	u64 current_value;
+
+	rdmsrl_safe(msr, &current_value);
+
 	switch (msr) {
 	case MSR_CORE_PERF_GLOBAL_CTRL:
-		add_atomic_switch_msr(vmx, msr, initial_value, current_value);
-		return;
+		if (cpu_has_load_perf_global_ctrl) {
+			add_atomic_switch_msr(vmx, msr, guest_value, current_value);
+			return;
+		}
+		break;
 	}
-	add_guest_load_msr_generic(vmx, msr, read_guest_store_msr(vmx, msr, initial_value));
+	add_guest_load_msr_generic(vmx, msr, guest_value);
 	add_guest_store_msr_generic(vmx, msr);
 
 	add_host_load_msr_generic(vmx, msr, current_value);
@@ -7303,39 +7356,82 @@ static inline u64 mask_general_counter(u64 value) {
 	return mask_counter(value, cpu_general_counters_bit_width());
 }
 
-static inline unsigned retired_branch_counter_msr(void)
-{
-	return MSR_P6_PERFCTR0 + cpu_num_general_counters() - 1;
+static inline int rbc_msr_index(void) {
+	return cpu_num_general_counters() - 1;
 }
 
-static inline unsigned retired_branch_counter_ctrl_msr(void)
+static inline unsigned rbc_msr(void)
 {
-	return MSR_P6_EVNTSEL0 + cpu_num_general_counters() - 1;
+	return MSR_P6_PERFCTR0 + rbc_msr_index();
 }
 
-static u64 vmx_read_retired_branch_counter(struct kvm_vcpu *vcpu)
+static inline unsigned rbc_ctrl_msr(void)
+{
+	return MSR_P6_EVNTSEL0 + rbc_msr_index();
+}
+
+static int vmx_rkvm_host_init(struct kvm *kvm)
+{
+	rkvm_mark_guest_reg_unavailable(kvm, rbc_msr());
+	rkvm_mark_guest_reg_unavailable(kvm, rbc_ctrl_msr());
+	rkvm_mark_guest_reg_unavailable(kvm, MSR_CORE_PERF_GLOBAL_CTRL);
+	rkvm_mark_guest_reg_unavailable(kvm, MSR_CORE_PERF_GLOBAL_STATUS);
+	rkvm_mark_guest_reg_unavailable(kvm, MSR_CORE_PERF_GLOBAL_OVF_CTRL);
+	rkvm_mark_guest_reg_unavailable(kvm, MSR_IA32_DEBUGCTLMSR);
+
+	return 0;
+}
+
+static u64 vmx_read_rbc(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
-	return expand_general_counter(read_guest_store_msr(vmx, retired_branch_counter_msr(), 0));
+	return expand_general_counter(read_guest_store_msr(vmx, rbc_msr(), 0));
 }
 
-static void vmx_set_retired_branch_counter(struct kvm_vcpu *vcpu, u64 value)
+static void vmx_set_rbc(struct kvm_vcpu *vcpu, u64 value)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
-	set_guest_store_msr_generic(vmx, retired_branch_counter_msr(), mask_general_counter(value));
+	set_guest_store_msr_generic(vmx, rbc_msr(), mask_general_counter(value));
 }
 
-static u32 vmx_read_preemption_timer_value(struct kvm_vcpu *vcpu)
+static bool vmx_clear_rbc_pmi(void)
+{
+	u64 one = 1;
+	u64 rbc_pmi_bit = one << rbc_msr_index();
+	u64 status;
+	bool has_pmi;
+	rdmsrl_safe(MSR_CORE_PERF_GLOBAL_STATUS, &status);
+	has_pmi = ((status & rbc_pmi_bit) != 0);
+	if (has_pmi)
+		wrmsrl(MSR_CORE_PERF_GLOBAL_OVF_CTRL, rbc_pmi_bit);
+	return has_pmi;
+}
+
+static bool vmx_has_rbc_pmi(void)
+{
+	u64 one = 1;
+	u64 rbc_pmi_bit = one << rbc_msr_index();
+	u64 status;
+	rdmsrl_safe(MSR_CORE_PERF_GLOBAL_STATUS, &status);
+	return ((status & rbc_pmi_bit) != 0);
+}
+
+static void vmx_make_apic_deliver_nmi_on_pmi(void)
+{
+	apic_write(APIC_LVTPC, (APIC_DM_NMI & ~APIC_LVT_MASKED));
+}
+
+static u32 vmx_read_preemption_timer_value(void)
 {
 	return vmcs_read32(VMX_PREEMPTION_TIMER_VALUE);
 }
 
-static void vmx_write_preemption_timer_value(struct kvm_vcpu *vcpu, u32 value)
+static void vmx_write_preemption_timer_value(u32 value)
 {
 	vmcs_write32(VMX_PREEMPTION_TIMER_VALUE, value);
 }
 
-static u64 vmx_read_guest_program_counter(struct kvm_vcpu *vcpu)
+static u64 vmx_read_guest_pc(struct kvm_vcpu *vcpu)
 {
 	return kvm_register_read(vcpu, VCPU_REGS_RIP);
 }
@@ -7345,39 +7441,62 @@ static u32 vmx_read_guest_ecx(struct kvm_vcpu *vcpu)
 	return (u32)kvm_register_read(vcpu, VCPU_REGS_RCX);
 }
 
-static bool vmx_guest_halted(struct kvm_vcpu *vcpu) {
+static bool vmx_guest_halted(struct kvm_vcpu *vcpu)
+{
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	return vmx->exit_reason == EXIT_REASON_HLT;
+}
+
+static u32 vmx_exit_reason(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	return vmx->exit_reason;
+}
+
+static bool vmx_has_internal_exit_reason(struct kvm_vcpu *vcpu)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	switch (vmx->exit_reason) {
+	default:
+		return false;
+	case EXIT_REASON_EPT_VIOLATION:
+	case EXIT_REASON_EPT_MISCONFIG:
+		return true;
+	}
+}
+
+static u32 vmx_userspace_exit_reason(struct kvm_vcpu *vcpu) {
+	return vcpu->run->exit_reason;
 }
 
 static void prepare_guest_kept_msrs(struct vcpu_vmx *vmx)
 {
 	u64 one = 1;
-	u64 perf_global_ctrl_enable_last_ctr = one << (cpu_num_general_counters() - 1);
+	u64 rbc_global_ctrl_enable_bit = one << rbc_msr_index();
 
 	u64 perf_ctrl_enable_all_ring_levels = (one << 16) | (one << 17);
 	u64 perf_ctrl_enable = one << 22;
 	u64 perf_ctrl_apic_intr_enable = one << 20;
-	u64 perf_ctrl_branch_retired_event_select = 0xc4;
-	u64 perf_ctrl_branch_retired_umask = 0 << 8;
+	u64 perf_ctrl_branch_retired_event_select = 0xc4; // RBC: 0xc4; RIC: 0xc0
+	u64 perf_ctrl_branch_retired_umask = 1 << 8; /* Only conditional branches: 1 << 8; */ /* All branches: 0 << 8; */
 
-	u64 perf_global_ctrl_msr_value;
+	bool recording = rkvm_recording(vmx->vcpu.kvm);
+	bool replaying = rkvm_replaying(vmx->vcpu.kvm);
 
-	add_guest_kept_msr(vmx, retired_branch_counter_msr(), 0);
+	if (!recording && !replaying)
+		return;
 
-	perf_global_ctrl_msr_value = perf_global_ctrl_enable_last_ctr;
-	add_guest_kept_msr(vmx, MSR_CORE_PERF_GLOBAL_CTRL,
-			   perf_global_ctrl_msr_value);
-	/*
-	 * This causes the machine to get stuck:
-	 * add_guest_kept_msr(vmx, MSR_CORE_PERF_GLOBAL_STATUS, 0);
-	 */
-	add_guest_kept_msr(vmx, retired_branch_counter_ctrl_msr(),
-			   perf_ctrl_enable_all_ring_levels |
-			   perf_ctrl_enable |
-			   perf_ctrl_apic_intr_enable |
-			   perf_ctrl_branch_retired_event_select |
-			   perf_ctrl_branch_retired_umask);
+	add_guest_kept_msr(vmx, rbc_msr(), 0);
+
+	add_guest_override_msr(vmx, MSR_CORE_PERF_GLOBAL_CTRL,
+			       rbc_global_ctrl_enable_bit);
+
+	add_guest_override_msr(vmx, rbc_ctrl_msr(),
+			       perf_ctrl_enable_all_ring_levels |
+			       perf_ctrl_enable |
+			       (replaying ? perf_ctrl_apic_intr_enable : 0) |
+			       perf_ctrl_branch_retired_event_select |
+			       perf_ctrl_branch_retired_umask);
 }
 
 void vmx_on_preemption(struct kvm_vcpu *vcpu)
@@ -7388,12 +7507,11 @@ void vmx_on_preemption(struct kvm_vcpu *vcpu)
 	*/
 }
 
-static void vmx_setup_preemption_timer(struct kvm_vcpu *vcpu, bool on)
+static void vmx_setup_preemption_timer(bool on)
 {
-	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	bool rdtscp_enabled;
 	if (kvm_has_preemption_timer) {
-		rdtscp_enabled = cpu_has_secondary_exec_ctrls() && vmx->rdtscp_enabled;
+		rdtscp_enabled = cpu_has_secondary_exec_ctrls() && vmx_rdtscp_supported();
 		if (on) {
 			vmcs_set_bits(PIN_BASED_VM_EXEC_CONTROL, PIN_BASED_VMX_PREEMPTION_TIMER);
 			if (rdtscp_enabled)
@@ -7406,7 +7524,7 @@ static void vmx_setup_preemption_timer(struct kvm_vcpu *vcpu, bool on)
 	}
 }
 
-static void vmx_save_preemption_timer_on_exit(struct kvm_vcpu *vcpu, bool on)
+static void vmx_save_preemption_timer_on_exit(bool on)
 {
 	if (kvm_has_preemption_timer) {
 		if (on)
@@ -7416,27 +7534,78 @@ static void vmx_save_preemption_timer_on_exit(struct kvm_vcpu *vcpu, bool on)
 	}
 }
 
-static void vmx_prepare_preemption_for_vmentry(struct kvm_vcpu *vcpu)
+static void vmx_ensure_rdtsc_exiting(void)
 {
-	if (rkvm_on(vcpu->kvm)) {
-		rkvm_on_vmentry(vcpu);
-		vmcs_set_bits(CPU_BASED_VM_EXEC_CONTROL, CPU_BASED_RDTSC_EXITING | CPU_BASED_ACTIVATE_SECONDARY_CONTROLS);
-	}
+	vmcs_set_bits(CPU_BASED_VM_EXEC_CONTROL,
+		      CPU_BASED_RDTSC_EXITING |
+		      CPU_BASED_RDPMC_EXITING |
+		      CPU_BASED_ACTIVATE_SECONDARY_CONTROLS);
 }
 
-static u32 vmx_read_hw_intr_info(struct kvm_vcpu *vcpu)
+static void vmx_disable_pending_virtual_intr(void)
+{
+	vmcs_clear_bits(CPU_BASED_VM_EXEC_CONTROL, CPU_BASED_VIRTUAL_INTR_PENDING);
+}
+
+static void vmx_disable_host_pmc_counters(void)
+{
+	wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, 0);
+	wrmsrl(rbc_ctrl_msr(), 0);
+	wrmsrl(rbc_msr(), 0);
+}
+
+static void vmx_enable_single_step(bool on)
+{
+	if (on)
+		vmcs_set_bits(CPU_BASED_VM_EXEC_CONTROL, CPU_BASED_MTF_EXITING);
+	else
+		vmcs_clear_bits(CPU_BASED_VM_EXEC_CONTROL, CPU_BASED_MTF_EXITING);
+}
+
+static bool vmx_read_hw_intr_info(int *int_vec)
 {
 	u32 value = vmcs_read32(VM_ENTRY_INTR_INFO_FIELD);
-	if ((value & INTR_INFO_VALID_MASK) != INTR_INFO_VALID_MASK)
-		value = 0;
-	else if ((value & INTR_TYPE_EXT_INTR) != INTR_TYPE_EXT_INTR)
-		value = 0;
-	return value;
+	if (!is_external_interrupt(value))
+		return false;
+	*int_vec = value & INTR_INFO_VECTOR_MASK;
+	return true;
 }
 
-static void vmx_set_intr_info(struct kvm_vcpu *vcpu, u32 value)
+static void vmx_set_hw_intr_info(int int_vec)
 {
-	vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, value);
+	vmcs_write32(VM_ENTRY_INTR_INFO_FIELD,
+		     int_vec | INTR_INFO_VALID_MASK | INTR_TYPE_EXT_INTR);
+	/* Clear halt. */
+	vmcs_write32(GUEST_ACTIVITY_STATE, GUEST_ACTIVITY_ACTIVE);
+}
+
+static bool vmx_inject_immediate_exit(void)
+{
+	u32 old_value = vmcs_read32(VM_ENTRY_INTR_INFO_FIELD);
+	u32 new_value = 0 | INTR_INFO_VALID_MASK | INTR_TYPE_OTHER_EVENT;
+	if (old_value == new_value)
+		return true;
+	if ((old_value & INTR_INFO_VALID_MASK) == INTR_INFO_VALID_MASK)
+		return false;
+	vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, new_value);
+	return true;
+}
+
+static void vmx_clear_immediate_exit(void)
+{
+	u32 value = vmcs_read32(VM_ENTRY_INTR_INFO_FIELD);
+	u32 expected_value = 0 | INTR_INFO_VALID_MASK | INTR_TYPE_OTHER_EVENT;
+	if (value == expected_value)
+		vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, 0);
+}
+
+static void vmx_inject_external_realmod_int(struct kvm_vcpu *vcpu, int int_vec)
+{
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
+	if (vmx->rmode.vm86_active) {
+		if (kvm_inject_realmode_interrupt(vcpu, int_vec, 0) != EMULATE_DONE)
+			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
+	}
 }
 
 static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
@@ -7471,15 +7640,19 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	if (vcpu->guest_debug & KVM_GUESTDBG_SINGLESTEP)
 		vmx_set_interrupt_shadow(vcpu, 0);
 
-	if (kvm_has_preemption_timer) {
-		vmx_prepare_preemption_for_vmentry(vcpu);
-		//vmx_set_retired_branch_counter(vcpu, -100LL);
-	}
+	rkvm_on_vmentry(vcpu, &rkvm_local_ops);
 
 	atomic_switch_perf_msrs(vmx);
 	prepare_guest_kept_msrs(vmx);
 	debugctlmsr = get_debugctlmsr();
-	update_debugctlmsr(DEBUGCTLMSR_FREEZE_PERFMON_ON_PMI | debugctlmsr);
+	if (rkvm_recording_or_replaying(vcpu->kvm)) {
+		vmcs_write64(GUEST_IA32_DEBUGCTL,
+			     vmcs_read64(GUEST_IA32_DEBUGCTL) |
+			     DEBUGCTLMSR_FREEZE_WHILE_SMM_EN);
+		update_debugctlmsr(debugctlmsr |
+				   DEBUGCTLMSR_FREEZE_WHILE_SMM_EN);
+	}
+	
 
 	vmx->__launched = vmx->loaded_vmcs->launched;
 	asm(
@@ -7619,8 +7792,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	vmx->exit_reason = vmcs_read32(VM_EXIT_REASON);
 	trace_kvm_exit(vmx->exit_reason, vcpu, KVM_ISA_VMX);
 
-	if (kvm_has_preemption_timer)
-		rkvm_on_vmexit(vcpu);
+	rkvm_on_vmexit(vcpu, is_external_interrupt(vmx->idt_vectoring_info), vmx->exit_reason, &rkvm_local_ops);
 
  	vmx_complete_atomic_exit(vmx);
 	vmx_recover_nmi_blocking(vmx);
@@ -8638,18 +8810,35 @@ static int vmx_check_intercept(struct kvm_vcpu *vcpu,
 	return X86EMUL_CONTINUE;
 }
 
-static struct rkvm_ops rkvm_ops = {
+static struct rkvm_local_ops rkvm_local_ops = {
 	.setup_preemption_timer = vmx_setup_preemption_timer,
 	.save_preemption_timer_on_exit = vmx_save_preemption_timer_on_exit,
+	.enable_single_step = vmx_enable_single_step,
+	.ensure_rdtsc_exiting = vmx_ensure_rdtsc_exiting,
+	.disable_pending_virtual_intr = vmx_disable_pending_virtual_intr,
+	.disable_host_pmc_counters = vmx_disable_host_pmc_counters,
 	.read_hw_intr_info = vmx_read_hw_intr_info,
-	.set_intr_info = vmx_set_intr_info,
-	.read_retired_branch_counter = vmx_read_retired_branch_counter,
-	.set_retired_branch_counter = vmx_set_retired_branch_counter,
+	.set_hw_intr_info = vmx_set_hw_intr_info,
+	.inject_immediate_exit = vmx_inject_immediate_exit,
+	.clear_immediate_exit = vmx_clear_immediate_exit,
+	.clear_rbc_pmi = vmx_clear_rbc_pmi,
+	.has_rbc_pmi = vmx_has_rbc_pmi,
+	.make_apic_deliver_nmi_on_pmi = vmx_make_apic_deliver_nmi_on_pmi,
 	.read_preemption_timer_value = vmx_read_preemption_timer_value,
 	.write_preemption_timer_value = vmx_write_preemption_timer_value,
-	.read_guest_program_counter = vmx_read_guest_program_counter,
+};
+
+static struct rkvm_ops rkvm_ops = {
+	.rkvm_host_init = vmx_rkvm_host_init,
+	.inject_external_realmod_int = vmx_inject_external_realmod_int,
+	.read_rbc = vmx_read_rbc,
+	.set_rbc = vmx_set_rbc,
+	.read_guest_pc = vmx_read_guest_pc,
 	.read_guest_ecx = vmx_read_guest_ecx,
 	.guest_halted = vmx_guest_halted,
+	.exit_reason = vmx_exit_reason,
+	.has_internal_exit_reason = vmx_has_internal_exit_reason,
+	.userspace_exit_reason = vmx_userspace_exit_reason,
 };
 
 static struct kvm_x86_ops vmx_x86_ops = {

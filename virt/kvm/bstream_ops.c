@@ -52,3 +52,60 @@ void register_bstream_file_ops(struct module *module)
 	bstream_file_fops.owner = module;
 }
 EXPORT_SYMBOL_GPL(register_bstream_file_ops);
+
+int create_bstream_file(const char *name, int permission,
+			u32 num_pages, u32 page_size_order,
+			atomic_long_t *back_pointer)
+{
+	int r = 0;
+
+	if (atomic_long_read(back_pointer) == 0) {
+		struct bstream *bstream = bstream_create(num_pages, page_size_order);
+		if (bstream != NULL) {
+			struct bstream_file_data *stream_data =
+				create_bstream_file_data(bstream);
+			if (stream_data != NULL) {
+				if (atomic_long_cmpxchg(back_pointer, 0, (long)stream_data) != 0) {
+					bstream_file_data_release(stream_data);
+				}
+			} else {
+				bstream_free(bstream);
+				r = -ENOMEM;
+			}
+		} else {
+			r = -ENOMEM;
+		}
+	}
+	return r;
+}
+EXPORT_SYMBOL_GPL(create_bstream_file);
+
+int open_bstream_file(const char *name, int permission,
+		      u32 num_pages, u32 page_size_order,
+		      atomic_long_t *back_pointer)
+{
+	/* TODO: Solve creation race. */
+	int r = create_bstream_file(name, permission, num_pages, page_size_order, back_pointer);
+	if (r >= 0) {
+		struct bstream_file_data *stream_data =
+			get_bstream_file_data(back_pointer);
+		if (stream_data != NULL) {
+			r = create_bstream_inode(name, permission, stream_data);
+			if (r < 0)
+				close_bstream_file(back_pointer);
+		} else {
+			r = -ENOMEM;
+		}
+	}
+	return r;
+}
+EXPORT_SYMBOL_GPL(open_bstream_file);
+
+void close_bstream_file(atomic_long_t *back_pointer)
+{
+	struct bstream_file_data *stream_data = (struct bstream_file_data *)
+		atomic_long_xchg(back_pointer, 0);
+	if (stream_data)
+		bstream_file_data_release(stream_data);
+}
+EXPORT_SYMBOL_GPL(close_bstream_file);

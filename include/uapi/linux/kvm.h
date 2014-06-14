@@ -237,6 +237,7 @@ struct kvm_run {
 			__u8  data[8];
 			__u32 len;
 			__u8  is_write;
+			__u8  is_internal;
 		} mmio;
 		/* KVM_EXIT_HYPERCALL */
 		struct {
@@ -1030,10 +1031,10 @@ struct kvm_s390_ucas_mapping {
 #define RKVM_GET_EXECUTION_MODE		_IOW(KVMIO,  0xc4, __u32)
 #define RKVM_USERSPACE_ENTRY	_IOW(KVMIO,  0xc5, struct rkvm_userspace_data)
 #define RKVM_USERSPACE_EXIT	_IOW(KVMIO,  0xc6, struct rkvm_userspace_data)
-#define RKVM_OPEN_RECORD_STREAM		_IO(KVMIO, 0xca)
-#define RKVM_OPEN_REPLAY_STREAM		_IO(KVMIO, 0xcb)
-#define RKVM_OPEN_TSC_RECORD_STREAM	_IO(KVMIO, 0xcc)
-#define RKVM_OPEN_TSC_REPLAY_STREAM	_IO(KVMIO, 0xcd)
+#define RKVM_OPEN_RECORD_STREAMS	_IO(KVMIO, 0xca)
+#define RKVM_OPEN_REPLAY_STREAMS	_IO(KVMIO, 0xcb)
+#define RKVM_OPEN_DEBUG_STREAM	        _IO(KVMIO, 0xcc)
+#define RKVM_XFER	                _IO(KVMIO, 0xcd)
 
 
 #define KVM_DEV_ASSIGN_ENABLE_IOMMU	(1 << 0)

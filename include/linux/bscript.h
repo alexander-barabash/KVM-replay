@@ -90,7 +90,7 @@ static inline bool bscript_write_s32(struct bstream *bstream, s32 number)
 }
 static inline bool bscript_read_s32(struct bstream *bstream, s32 *number)
 {
-	s32 u;
+	u32 u;
 	if (!bscript_read_u32(bstream, &u))
 		return false;
 	if(u & 1)
@@ -109,7 +109,7 @@ static inline bool bscript_write_s64(struct bstream *bstream, s64 number)
 }
 static inline bool bscript_read_s64(struct bstream *bstream, s64 *number)
 {
-	s64 u;
+	u64 u;
 	if (!bscript_read_u64(bstream, &u))
 		return false;
 	if(u & 1)

@@ -19,7 +19,8 @@ struct bstream {
 	struct mutex lock;
 	struct bstream_page pages[BSTREAM_MIN_PAGES];
 };
-
+#define spin_lock(...)
+#define spin_unlock(...)
 static inline u32 bstream_page_size(struct bstream *bstream)
 {
 	return PAGE_SIZE << bstream->page_size_order;
@@ -27,11 +28,15 @@ static inline u32 bstream_page_size(struct bstream *bstream)
 
 static inline const void *bstream_page_read_position(struct bstream_page *page)
 {
+	if (unlikely(!page->page))
+		return NULL;
 	return (const void *)(page->page + page->read_index);
 }
 
 static inline void *bstream_page_write_position(struct bstream_page *page)
 {
+	if (unlikely(!page->page))
+		return NULL;
 	return (void *)(page->page + page->write_index);
 }
 
@@ -185,7 +190,7 @@ struct bstream *bstream_create(u32 num_pages, u32 page_size_order)
 	mutex_init(&bstream->lock);
 	bstream->num_pages = num_pages;
 	bstream->page_size_order = page_size_order;
-	for (i = 0; i < BSTREAM_MIN_PAGES; ++i) {
+	for (i = 0; i < num_pages; ++i) {
 		if (!bstream_alloc_page(bstream, i)) {
 			bstream_free(bstream);
 			return NULL;
@@ -222,6 +227,7 @@ ssize_t bstream_read_unlocked(struct bstream *bstream, long buf, bool is_user, s
 		bool exclusive_read;
 		u32 unread_on_page;
 		unsigned long to_copy, not_copied;
+		const void *read_position;
 
 		if (bstream_page == NULL)
 			bstream_page = bstream_read_page(bstream, &exclusive_read, &unread_on_page);
@@ -248,15 +254,21 @@ ssize_t bstream_read_unlocked(struct bstream *bstream, long buf, bool is_user, s
 			to_copy = size;
 			size = 0;
 		}
-		if (is_user) {
-			not_copied = copy_to_user((char __user *)buf,
-						  bstream_page_read_position(bstream_page),
-						  to_copy);
+		
+		read_position = bstream_page_read_position(bstream_page);
+		if (read_position) {
+			if (is_user) {
+				not_copied = copy_to_user((char __user *)buf,
+							  read_position,
+							  to_copy);
+			} else {
+				memcpy((char *)buf,
+				       read_position,
+				       to_copy);
+				not_copied = 0;
+			}
 		} else {
-			memcpy((char *)buf,
-			       bstream_page_read_position(bstream_page),
-			       to_copy);
-			not_copied = 0;
+			not_copied = to_copy;
 		}
 		if (not_copied < to_copy) {
 			to_copy -= not_copied;
@@ -291,6 +303,19 @@ ssize_t bstream_read(struct bstream *bstream, char __user *buf, size_t size, lof
 }
 EXPORT_SYMBOL_GPL(bstream_read);
 
+bool bstream_on_last_write_page(struct bstream *bstream)
+{
+	return (bstream_next_page_index(bstream, bstream->write_page_index) ==
+		bstream->read_page_index);
+}
+EXPORT_SYMBOL_GPL(bstream_on_last_write_page);
+
+bool bstream_on_last_read_page(struct bstream *bstream)
+{
+	return (bstream->read_page_index == bstream->write_page_index);
+}
+EXPORT_SYMBOL_GPL(bstream_on_last_read_page);
+
 ssize_t bstream_write_unlocked(struct bstream *bstream,
 			       long buf,
 			       bool is_user,
@@ -308,6 +333,7 @@ ssize_t bstream_write_unlocked(struct bstream *bstream,
 	while (size > 0) {
 		u32 left_on_page;
 		unsigned long to_copy, not_copied;
+		void *write_position;
 
 		if (bstream_page == NULL) {
 			bstream_page = bstream_write_page(bstream, &left_on_page);
@@ -322,8 +348,7 @@ ssize_t bstream_write_unlocked(struct bstream *bstream,
 					break;
 				}
 				/* TODO: reuse existing page if possible */
-				if (!bstream_page_alloc_page(bstream, bstream_page))
-					break;
+				break;
 			}
 			left_on_page = bstream_page_size(bstream);
 		}
@@ -338,15 +363,20 @@ ssize_t bstream_write_unlocked(struct bstream *bstream,
 			to_copy = size;
 			size = 0;
 		}
-		if (is_user) {
-			not_copied = copy_from_user(bstream_page_write_position(bstream_page),
-						    (const char __user *)buf,
-						    to_copy);
+		write_position = bstream_page_write_position(bstream_page);
+		if (write_position) {
+			if (is_user) {
+				not_copied = copy_from_user(write_position,
+							    (const char __user *)buf,
+							    to_copy);
+			} else {
+				memcpy(write_position,
+				       (const char *)buf,
+				       to_copy);
+				not_copied = 0;
+			}
 		} else {
-			memcpy(bstream_page_write_position(bstream_page),
-			       (const char *)buf,
-			       to_copy);
-			not_copied = 0;
+			not_copied = to_copy;
 		}
 		if (not_copied < to_copy) {
 			to_copy -= not_copied;

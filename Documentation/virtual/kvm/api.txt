@@ -2451,22 +2451,31 @@ Type: vm ioctl
 Parameters: struct rkvm_userspace_data (in)
 Returns: 0 on success, negative value on failure
 
-4.92 RKVM_OPEN_RECORD_STREAM
+4.92 RKVM_OPEN_RECORD_STREAMS
 
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
 Type: vcpu ioctl
-Parameters: None
-Returns: file descriptor number (>= 0) on success, -1 on error
+Parameters: struct rkvm_stream_fds (out)
+Returns: 0 on success, negative value on failure
 
-4.92 RKVM_OPEN_REPLAY_STREAM
+struct rkvm_stream_fds is defined as follows:
+
+       struct rkvm_stream_fds {
+              int fd[8];
+              char name[8][8];
+              int count;
+       };
+
+4.93 RKVM_OPEN_REPLAY_STREAMS
 
 Capability: KVM_CAP_PREEMPTION_TIMER
 Architectures: x86
 Type: vcpu ioctl
-Parameters: None
-Returns: file descriptor number (>= 0) on success, -1 on error
+Parameters: struct rkvm_stream_fds (out)
+Returns: 0 on success, negative value on failure
 
+See RKVM_OPEN_RECORD_STREAMS for struct rkvm_stream_fds definition.
 
 5. The kvm_run structure
 ------------------------
