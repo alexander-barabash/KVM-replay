@@ -12,11 +12,14 @@ enum rkvm_stream_index {
 	RKVM_TSC_STREAM,
 	RKVM_IRQ_STREAM,
 	RKVM_IRQCNT_STREAM,
-	RKVM_IRQPC_STREAM,
-	RKVM_IRQECX_STREAM,
 	RKVM_PIO_STREAM,
 	RKVM_REGS_STREAM,
 	RKVM_SREGS_STREAM,
+	RKVM_XSAVE_STREAM,
+	RKVM_XCRS_STREAM,
+	RKVM_MCE_STREAM,
+	RKVM_EVENTS_STREAM,
+	RKVM_DREGS_STREAM,
 	RKVM_EXITRSN_STREAM,
 	RKVM_INSIZE_STREAM,
 	RKVM_OUTSIZE_STREAM,
@@ -24,6 +27,7 @@ enum rkvm_stream_index {
 	RKVM_OUTPORT_STREAM,
 	RKVM_MMIOSIZ_STREAM,
 	RKVM_MMIOADR_STREAM,
+	RKVM_DMA_STREAM,
 	RKVM_NUM_STREAMS
 };
 
@@ -31,6 +35,7 @@ enum rkvm_sync_reason {
 	RKVM_NO_RSN,
 	RKVM_RSN_VCPU_EXIT,
 	RKVM_RSN_PROTECTED_MOD_IRQ,
+	RKVM_RSN_PROTECTED_MOD_NMI,
 	RKVM_RSN_REAL_MOD_IRQ,
 };
 
@@ -41,24 +46,6 @@ enum rkvm_replay_state {
 	REPLAY_SINGLE_STEP,
 	REPLAY_HIT_EVENT,
 	REPLAY_NEW_TARGET,
-};
-
-struct rkvm_data {
-	struct rkvm_ops *ops;
-	u32 unavailable_regs[8];
-
-	spinlock_t lockstep_spinlock;
-
-	atomic_t mode;
-
-	struct rkvm_userspace_data userspace;
-
-	struct rkvm_recording {
-		u64 recorded_rid;
-	} recording;
-	struct rkvm_replaying {
-		u64 replayed_rid;
-	} replaying;
 };
 
 struct rkvm_delta {
@@ -79,14 +66,14 @@ struct rkvm_vcpu_data {
 	bool must_exit;
 	bool process_exit;
 	bool exit_immediately;
+	bool launched;
 
 	struct rkvm_vcpu_recording {
+		atomic_long_t record_stream_data[RKVM_NUM_STREAMS];
 		struct rkvm_point recorded_point;
 		struct rkvm_point pending_point;
 		enum rkvm_sync_reason pending_sync_reason;
 		u64 record_write_counter;
-		u64 pending_irqpc;
-		u32 pending_irqecx;
 		u8 pending_irq;
 		u8 pending_irqcnt;
 		u32 pending_exitrsn;
@@ -98,10 +85,9 @@ struct rkvm_vcpu_data {
 	} recording;
 
 	struct rkvm_vcpu_replaying {
+		atomic_long_t replay_stream_data[RKVM_NUM_STREAMS];
 		enum rkvm_replay_state replay_state;
 		struct rkvm_point replay_target_point;
-		u64 pending_irqpc;
-		u32 pending_irqecx;
 		u8 pending_irq;
 		u8 pending_irqcnt;
 		u32 pending_exitrsn;
@@ -115,6 +101,9 @@ struct rkvm_vcpu_data {
 		s64 accumulate_rbc_delta;
 	} replaying;
 
+	u64 vmentry_guest_pc;
+	u32 vmentry_guest_ecx;
+
 	u64 accumulate_rbc;
 	u64 vmexit_guest_pc;
 	u32 vmexit_guest_ecx;
@@ -125,9 +114,27 @@ struct rkvm_vcpu_data {
 
 	atomic_t irq_counts[KVM_NR_INTERRUPTS];
 
-	atomic_long_t record_stream_data[RKVM_NUM_STREAMS];
-	atomic_long_t replay_stream_data[RKVM_NUM_STREAMS];
 	atomic_long_t debug_stream_data;
+};
+
+struct rkvm_data {
+	struct rkvm_ops *ops;
+	u32 unavailable_regs[8];
+
+	spinlock_t lockstep_spinlock;
+
+	atomic_t mode;
+
+	struct rkvm_userspace_data userspace;
+
+	struct rkvm_recording {
+		u64 recorded_rid;
+	} recording;
+	struct rkvm_replaying {
+		u64 replayed_rid;
+	} replaying;
+
+	rkvm_vcpu_host *dma_vcpu;
 };
 
 #endif /* __RKVM_INTERNAL_H */

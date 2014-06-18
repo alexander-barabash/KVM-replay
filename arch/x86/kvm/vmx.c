@@ -856,6 +856,12 @@ static inline bool is_external_interrupt(u32 intr_info)
 		== (INTR_TYPE_EXT_INTR | INTR_INFO_VALID_MASK);
 }
 
+static inline bool is_nmi_interrupt(u32 intr_info)
+{
+	return (intr_info & (INTR_INFO_INTR_TYPE_MASK | INTR_INFO_VALID_MASK))
+		== (INTR_TYPE_NMI_INTR | INTR_INFO_VALID_MASK);
+}
+
 static inline bool is_machine_check(u32 intr_info)
 {
 	return (intr_info & (INTR_INFO_INTR_TYPE_MASK | INTR_INFO_VECTOR_MASK |
@@ -2088,6 +2094,8 @@ static void vmx_queue_exception(struct kvm_vcpu *vcpu, unsigned nr,
 		int inc_eip = 0;
 		if (kvm_exception_is_soft(nr))
 			inc_eip = vcpu->arch.event_exit_inst_len;
+		else if (!rkvm_before_inject_rmod_irq(vcpu, nr))
+			return;
 		if (kvm_inject_realmode_interrupt(vcpu, nr, inc_eip) != EMULATE_DONE)
 			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
 		return;
@@ -4711,10 +4719,14 @@ static void vmx_inject_nmi(struct kvm_vcpu *vcpu)
 	++vcpu->stat.nmi_injections;
 	vmx->nmi_known_unmasked = false;
 	if (vmx->rmode.vm86_active) {
+		if (!rkvm_before_inject_rmod_irq(vcpu, NMI_VECTOR))
+			return;
 		if (kvm_inject_realmode_interrupt(vcpu, NMI_VECTOR, 0) != EMULATE_DONE)
 			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
 		return;
 	}
+	if (!rkvm_after_inject_nmi(vcpu, NMI_VECTOR))
+		return;
 	vmcs_write32(VM_ENTRY_INTR_INFO_FIELD,
 			INTR_TYPE_NMI_INTR | INTR_INFO_VALID_MASK | NMI_VECTOR);
 }
@@ -7579,6 +7591,23 @@ static void vmx_set_hw_intr_info(int int_vec)
 	vmcs_write32(GUEST_ACTIVITY_STATE, GUEST_ACTIVITY_ACTIVE);
 }
 
+static bool vmx_read_nmi_intr_info(int *int_vec)
+{
+	u32 value = vmcs_read32(VM_ENTRY_INTR_INFO_FIELD);
+	if (!is_nmi_interrupt(value))
+		return false;
+	*int_vec = value & INTR_INFO_VECTOR_MASK;
+	return true;
+}
+
+static void vmx_set_nmi_intr_info(int int_vec)
+{
+	vmcs_write32(VM_ENTRY_INTR_INFO_FIELD,
+		     int_vec | INTR_INFO_VALID_MASK | INTR_TYPE_NMI_INTR);
+	/* Clear halt. */
+	vmcs_write32(GUEST_ACTIVITY_STATE, GUEST_ACTIVITY_ACTIVE);
+}
+
 static bool vmx_inject_immediate_exit(void)
 {
 	u32 old_value = vmcs_read32(VM_ENTRY_INTR_INFO_FIELD);
@@ -7792,7 +7821,11 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	vmx->exit_reason = vmcs_read32(VM_EXIT_REASON);
 	trace_kvm_exit(vmx->exit_reason, vcpu, KVM_ISA_VMX);
 
-	rkvm_on_vmexit(vcpu, is_external_interrupt(vmx->idt_vectoring_info), vmx->exit_reason, &rkvm_local_ops);
+	rkvm_on_vmexit(vcpu,
+		       is_external_interrupt(vmx->idt_vectoring_info) ||
+		       is_nmi_interrupt(vmx->idt_vectoring_info),
+		       vmx->exit_reason,
+		       &rkvm_local_ops);
 
  	vmx_complete_atomic_exit(vmx);
 	vmx_recover_nmi_blocking(vmx);
@@ -8819,6 +8852,8 @@ static struct rkvm_local_ops rkvm_local_ops = {
 	.disable_host_pmc_counters = vmx_disable_host_pmc_counters,
 	.read_hw_intr_info = vmx_read_hw_intr_info,
 	.set_hw_intr_info = vmx_set_hw_intr_info,
+	.read_nmi_intr_info = vmx_read_nmi_intr_info,
+	.set_nmi_intr_info = vmx_set_nmi_intr_info,
 	.inject_immediate_exit = vmx_inject_immediate_exit,
 	.clear_immediate_exit = vmx_clear_immediate_exit,
 	.clear_rbc_pmi = vmx_clear_rbc_pmi,

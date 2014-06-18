@@ -3207,6 +3207,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 		r = -EFAULT;
 		if (copy_from_user(&mce, argp, sizeof mce))
 			goto out;
+		rkvm_on_set_mce(vcpu, &mce, sizeof(mce));
 		r = kvm_vcpu_ioctl_x86_set_mce(vcpu, &mce);
 		break;
 	}
@@ -3228,6 +3229,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 		if (copy_from_user(&events, argp, sizeof(struct kvm_vcpu_events)))
 			break;
 
+		rkvm_on_set_events(vcpu, &events, sizeof(events));
 		r = kvm_vcpu_ioctl_x86_set_vcpu_events(vcpu, &events);
 		break;
 	}
@@ -3251,6 +3253,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 				   sizeof(struct kvm_debugregs)))
 			break;
 
+		rkvm_on_set_dregs(vcpu, &dbgregs, sizeof(dbgregs));
 		r = kvm_vcpu_ioctl_x86_set_debugregs(vcpu, &dbgregs);
 		break;
 	}
@@ -3273,6 +3276,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 		if (IS_ERR(u.xsave))
 			return PTR_ERR(u.xsave);
 
+		rkvm_on_set_xsave(vcpu, u.xsave, sizeof(*u.xsave));
 		r = kvm_vcpu_ioctl_x86_set_xsave(vcpu, u.xsave);
 		break;
 	}
@@ -3296,6 +3300,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 		if (IS_ERR(u.xcrs))
 			return PTR_ERR(u.xcrs);
 
+		rkvm_on_set_xcrs(vcpu, u.xcrs, sizeof(*u.xcrs));
 		r = kvm_vcpu_ioctl_x86_set_xcrs(vcpu, u.xcrs);
 		break;
 	}

@@ -4,6 +4,8 @@
 #include <linux/types.h>
 
 struct rkvm_vcpu_debug_data {
+	__u64 cnt;
+
 	__u64 accumulate_preemption_timer;
 	__u64 reported_secs;
 	

@@ -30,6 +30,8 @@ struct rkvm_local_ops {
 	void (*disable_host_pmc_counters)(void);
 	bool (*read_hw_intr_info)(int *int_vec);
 	void (*set_hw_intr_info)(int int_vec);
+	bool (*read_nmi_intr_info)(int *int_vec);
+	void (*set_nmi_intr_info)(int int_vec);
 	bool (*inject_immediate_exit)(void);
 	void (*clear_immediate_exit)(void);
 	bool (*clear_rbc_pmi)(void);
@@ -84,12 +86,18 @@ extern void rkvm_on_update_vmexit_state(rkvm_vcpu_host *vcpu);
 
 extern bool rkvm_before_inject_rmod_irq(rkvm_vcpu_host *vcpu, int irq);
 extern bool rkvm_after_inject_irq(rkvm_vcpu_host *vcpu, int irq);
+extern bool rkvm_after_inject_nmi(rkvm_vcpu_host *vcpu, int irq);
 
 extern bool rkvm_on_pio_in_data_avail(rkvm_vcpu_host *vcpu,
 				      void *target, const void *src, int size);
 
 extern void rkvm_on_set_regs(rkvm_vcpu_host *vcpu, void *src, unsigned size);
 extern void rkvm_on_set_sregs(rkvm_vcpu_host *vcpu, void *src, unsigned size);
+extern void rkvm_on_set_xsave(rkvm_vcpu_host *vcpu, void *src, unsigned size);
+extern void rkvm_on_set_xcrs(rkvm_vcpu_host *vcpu, void *src, unsigned size);
+extern void rkvm_on_set_mce(rkvm_vcpu_host *vcpu, void *src, unsigned size);
+extern void rkvm_on_set_events(rkvm_vcpu_host *vcpu, void *src, unsigned size);
+extern void rkvm_on_set_dregs(rkvm_vcpu_host *vcpu, void *src, unsigned size);
 
 extern bool rkvm_handle_halt(rkvm_vcpu_host *vcpu);
 extern void rkvm_handle_external_interrupt(rkvm_vcpu_host *vcpu);
