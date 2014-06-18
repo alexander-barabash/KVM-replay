@@ -30,16 +30,21 @@
 #define EXIT_REASON_EXCEPTION_NMI       0
 #define EXIT_REASON_EXTERNAL_INTERRUPT  1
 #define EXIT_REASON_TRIPLE_FAULT        2
-
+#define EXIT_REASON_INIT_SIGNAL         3
+#define EXIT_REASON_SIPI                4
+#define EXIT_REASON_IO_SMI              5
+#define EXIT_REASON_OTHER_SMI           6
 #define EXIT_REASON_PENDING_INTERRUPT   7
 #define EXIT_REASON_NMI_WINDOW          8
 #define EXIT_REASON_TASK_SWITCH         9
 #define EXIT_REASON_CPUID               10
+#define EXIT_REASON_GETSEC              11
 #define EXIT_REASON_HLT                 12
 #define EXIT_REASON_INVD                13
 #define EXIT_REASON_INVLPG              14
 #define EXIT_REASON_RDPMC               15
 #define EXIT_REASON_RDTSC               16
+#define EXIT_REASON_RSM_IN_SMM          17
 #define EXIT_REASON_VMCALL              18
 #define EXIT_REASON_VMCLEAR             19
 #define EXIT_REASON_VMLAUNCH            20
@@ -65,14 +70,20 @@
 #define EXIT_REASON_TPR_BELOW_THRESHOLD 43
 #define EXIT_REASON_APIC_ACCESS         44
 #define EXIT_REASON_EOI_INDUCED         45
+#define EXIT_REASON_GDTR_IDTR           46
+#define EXIT_REASON_LDTR_TR             47
 #define EXIT_REASON_EPT_VIOLATION       48
 #define EXIT_REASON_EPT_MISCONFIG       49
+#define EXIT_REASON_INVEPT              50
 #define EXIT_REASON_RDTSCP              51
 #define EXIT_REASON_PREEMPTION_TIMER    52
+#define EXIT_REASON_INVVPID             53
 #define EXIT_REASON_WBINVD              54
 #define EXIT_REASON_XSETBV              55
 #define EXIT_REASON_APIC_WRITE          56
+#define EXIT_REASON_RDRAND              57
 #define EXIT_REASON_INVPCID             58
+#define EXIT_REASON_VMFUNC              59
 
 #define VMX_EXIT_REASONS \
 	{ EXIT_REASON_EXCEPTION_NMI,         "EXCEPTION_NMI" }, \
