@@ -41,7 +41,6 @@ enum rkvm_sync_reason {
 
 enum rkvm_replay_state {
 	REPLAY_UNINITIALIZED,
-	NO_REPLAY,
 	REPLAY_WAIT_FOR_PMI,
 	REPLAY_SINGLE_STEP,
 	REPLAY_HIT_EVENT,
@@ -86,6 +85,8 @@ struct rkvm_vcpu_data {
 
 	struct rkvm_vcpu_replaying {
 		atomic_long_t replay_stream_data[RKVM_NUM_STREAMS];
+		bool replay_disabled;
+		bool need_replay_cleanup;
 		enum rkvm_replay_state replay_state;
 		struct rkvm_point replay_target_point;
 		u8 pending_irq;

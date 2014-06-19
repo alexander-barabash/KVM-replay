@@ -329,9 +329,25 @@ static inline void update_rkvm_vcpu_debug_data(rkvm_vcpu_host *vcpu)
 	debug->userspace_running = rkvm_data->userspace.running;
 }
 
+static inline void disable_replay(rkvm_vcpu_host *vcpu)
+{
+	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
+	if (!vcpu_replaying->replay_disabled) {
+		RKVM_DEBUG_PRINT(vcpu, "End of bscript.\n");
+		vcpu_replaying->replay_disabled = true;
+		vcpu_replaying->need_replay_cleanup = true;
+	}
+}
+
+static inline bool is_replay_disabled(rkvm_vcpu_host *vcpu)
+{
+	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
+	return vcpu_replaying->replay_disabled;
+}
+
 static int on_rkvm_xfer(rkvm_host *host, struct rkvm_xfer *rkvm_xfer)
 {
-	int r;
+	int r = 0;
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	struct rkvm_replaying *replaying = RKVM_REPLAYING(host);
 	struct rkvm_recording *recording = RKVM_RECORDING(host);
@@ -350,68 +366,74 @@ static int on_rkvm_xfer(rkvm_host *host, struct rkvm_xfer *rkvm_xfer)
 		return -EAGAIN;
 	}
 
-	if (lock_step) {
-		do_xfer = true;
-		spin_lock(&rkvm_data->lockstep_spinlock);
-		if (replay) {
+	if (replay && is_replay_disabled(dma_vcpu))
+		goto fallback;
+	if (!lock_step)
+		goto fallback;
+
+	do_xfer = true;
+	spin_lock(&rkvm_data->lockstep_spinlock);
+	if (replay) {
+		RKVM_DEBUG_PRINT(dma_vcpu, 
+				 "on_rkvm_xfer: %d bytes next_rid=%lld DMA rid=%lld GLOBAL rid=%lld\n",
+				 rkvm_xfer->size,
+				 (long long)dma_replaying->next_rid,
+				 (long long)dma_replaying->replayed_rid,
+				 (long long)replaying->replayed_rid);
+		if (dma_replaying->next_rid == dma_replaying->replayed_rid) {
+			u64 rid_delta;
+			if (RKVM_READ_REPLAY_VALUE(dma_vcpu, u64, RKVM_RID_STREAM, &rid_delta) && (rid_delta != 0)) {
+				RKVM_DEBUG_PRINT(dma_vcpu, "rid_delta=%lld\n", rid_delta);
+				dma_replaying->next_rid = dma_replaying->replayed_rid + rid_delta;
+			} else {
+				no_replay = true;
+				goto unlock;
+			}
+		}
+			
+		if (dma_replaying->next_rid != replaying->replayed_rid + 1) {
+			do_xfer = false;
 			RKVM_DEBUG_PRINT(dma_vcpu, 
-					 "on_rkvm_xfer: %d bytes next_rid=%lld DMA rid=%lld GLOBAL rid=%lld\n",
+					 "NO TRANSFER: on_rkvm_xfer: %d bytes next_rid=%lld GLOBAL rid=%lld\n",
 					 rkvm_xfer->size,
 					 (long long)dma_replaying->next_rid,
-					 (long long)dma_replaying->replayed_rid,
 					 (long long)replaying->replayed_rid);
-			if (dma_replaying->next_rid == dma_replaying->replayed_rid) {
-				u64 rid_delta;
-				if (RKVM_READ_REPLAY_VALUE(dma_vcpu, u64, RKVM_RID_STREAM, &rid_delta)) {
-					RKVM_DEBUG_PRINT(dma_vcpu, "rid_delta=%lld\n", rid_delta);
-					dma_replaying->next_rid = dma_replaying->replayed_rid + rid_delta + 1;
-				} else {
-					RKVM_DEBUG_PRINT(dma_vcpu, "Cannot read bscript.\n");
-					no_replay = true;
-				}
-			}
-			
-			if (!no_replay) {
-				if (dma_replaying->next_rid != replaying->replayed_rid + 1) {
-					do_xfer = false;
-					RKVM_DEBUG_PRINT(dma_vcpu, 
-							 "NO TRANSFER: on_rkvm_xfer: %d bytes next_rid=%lld GLOBAL rid=%lld\n",
-							 rkvm_xfer->size,
-							 (long long)dma_replaying->next_rid,
-							 (long long)replaying->replayed_rid);
-				} else {
-					RKVM_DEBUG_PRINT(dma_vcpu, 
-							 "on_rkvm_xfer: %d bytes rid=%lld\n",
-							 rkvm_xfer->size,
-							 (long long)dma_replaying->next_rid);
-				}
-			}
-		}
-		if (record) {
-			u64 rid = recording->recorded_rid;
-
-			dma_recording->vcpu_halted = false;
-
-			RKVM_RECORD_VALUE(dma_vcpu, u64, RKVM_RID_STREAM, rid - dma_recording->recorded_rid);
-			recording->recorded_rid = dma_recording->recorded_rid = rid + 1;
-
-			RKVM_DEBUG_PRINT(dma_vcpu,
+		} else {
+			RKVM_DEBUG_PRINT(dma_vcpu, 
 					 "on_rkvm_xfer: %d bytes rid=%lld\n",
 					 rkvm_xfer->size,
-					 (long long)recording->recorded_rid);
+					 (long long)dma_replaying->next_rid);
 		}
-		if (do_xfer) {
-			r = do_rkvm_xfer(host, rkvm_xfer, record, replay);
-			if (replay && !no_replay)
-				replaying->replayed_rid = dma_replaying->replayed_rid = dma_replaying->next_rid;
-		} else {
-			r = -EAGAIN;
-		}
-		spin_unlock(&rkvm_data->lockstep_spinlock);
+	}
+	if (record) {
+		dma_recording->vcpu_halted = false;
+		
+		recording->recorded_rid++;
+		RKVM_RECORD_VALUE(dma_vcpu, u64, RKVM_RID_STREAM, recording->recorded_rid - dma_recording->recorded_rid);
+		dma_recording->recorded_rid = recording->recorded_rid;
+		
+		RKVM_DEBUG_PRINT(dma_vcpu,
+				 "on_rkvm_xfer: %d bytes rid=%lld\n",
+				 rkvm_xfer->size,
+				 (long long)recording->recorded_rid);
+	}
+	if (do_xfer) {
+		r = do_rkvm_xfer(host, rkvm_xfer, record, replay);
+		if (replay)
+			replaying->replayed_rid = dma_replaying->replayed_rid = dma_replaying->next_rid;
 	} else {
-		r = do_rkvm_xfer(host, rkvm_xfer, false, false);
+		r = -EAGAIN;
+	}
+ unlock:
+	spin_unlock(&rkvm_data->lockstep_spinlock);
+	if (no_replay) {
+		disable_replay(dma_vcpu);
+		goto fallback;
 	}
 	return r;
+
+ fallback:
+	return do_rkvm_xfer(host, rkvm_xfer, false, false);	
 }
 
 static int do_rkvm_xfer(rkvm_host *host, struct rkvm_xfer *rkvm_xfer, bool record, bool replay)
@@ -1016,14 +1038,14 @@ static void rkvm_recording_on_vcpu_exit(rkvm_vcpu_host *vcpu, bool internal)
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	struct rkvm_ops *ops = rkvm_data->ops;
 	u32 exitrsn = ops->userspace_exit_reason(vcpu);
-	u64 rid = recording->recorded_rid;
 
 	if (!vcpu_data->process_exit)
 		return;
 	vcpu_data->process_exit = false;
 
-	RKVM_RECORD_VALUE(vcpu, u64, RKVM_RID_STREAM, rid - vcpu_recording->recorded_rid);
-	recording->recorded_rid = vcpu_recording->recorded_rid = rid + 1;
+	recording->recorded_rid++;
+	RKVM_RECORD_VALUE(vcpu, u64, RKVM_RID_STREAM, recording->recorded_rid - vcpu_recording->recorded_rid);
+	vcpu_recording->recorded_rid = recording->recorded_rid;
 
 	if (!internal) {
 		switch (exitrsn) {
@@ -1217,6 +1239,14 @@ static void rkvm_replaying_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_op
 	u64 new_rbc = rbc_threshold + vcpu_data->accumulate_rbc - vcpu_replaying->replay_target_point.rbc;
 	bool single_step = false;
 
+	if (is_replay_disabled(vcpu)) {
+		if (vcpu_replaying->need_replay_cleanup) {
+			vcpu_replaying->need_replay_cleanup = false;
+			lops->enable_single_step(false);
+		}
+		return;
+	}
+
 	vcpu_replaying->has_internal_exit_reason = false;
 
 	if (lops->clear_rbc_pmi()) {
@@ -1230,9 +1260,6 @@ static void rkvm_replaying_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_op
 			      vcpu_data->vmentry_guest_pc, vcpu_data->vmentry_guest_ecx);
 
 	switch (vcpu_replaying->replay_state) {
-	case NO_REPLAY:
-		lops->enable_single_step(false);
-		return;
 	case REPLAY_WAIT_FOR_PMI:
 		if ((vcpu_replaying->replay_sync_reason == RKVM_RSN_VCPU_EXIT) &&
 		    is_synchronous_exit_reason(vcpu_replaying->pending_exitrsn))
@@ -1322,13 +1349,13 @@ static void rkvm_replaying_on_vmexit(rkvm_vcpu_host *vcpu,
 	struct rkvm_ops *ops = rkvm_data->ops;
 	bool has_pmi;
 
+	if (is_replay_disabled(vcpu))
+		return;
+
 	if (vcpu_data->exit_immediately) {
 		vcpu_data->exit_immediately = false;
 		lops->clear_immediate_exit();
 	}
-
-	if (vcpu_replaying->replay_state == NO_REPLAY)
-		return;
 
 	vcpu_replaying->has_internal_exit_reason = ops->has_internal_exit_reason(vcpu);
 
@@ -1343,7 +1370,7 @@ static void rkvm_replaying_on_vmexit(rkvm_vcpu_host *vcpu,
 			 (long long)vcpu_data->accumulate_rbc,
 			 (long long)vcpu_replaying->accumulate_rbc_delta);
 
-	if ((vcpu_replaying->replay_state != NO_REPLAY) && reinject_external_interrupt) {
+	if (reinject_external_interrupt) {
 		RKVM_DEBUG_PRINT(vcpu, "See reinject\n");
 	}
 
@@ -1353,7 +1380,7 @@ static void rkvm_replaying_on_vmexit(rkvm_vcpu_host *vcpu,
 		    (vcpu_replaying->replay_sync_reason == RKVM_RSN_REAL_MOD_IRQ)) {
 			if (!reinject_external_interrupt) {
 				if (!read_next_replay_target_point(vcpu))
-					vcpu_replaying->replay_state = NO_REPLAY;
+					disable_replay(vcpu);
 			} else {
 				RKVM_DEBUG_PRINT(vcpu, "Need reinject\n");
 			}
@@ -1384,13 +1411,16 @@ static bool rkvm_replaying_on_vcpu_entry(rkvm_vcpu_host *vcpu)
 	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
 	struct rkvm_replaying *replaying = RKVM_REPLAYING(host);
 
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return true;
 
 	if (vcpu_replaying->next_rid == vcpu_replaying->replayed_rid) {
 		u64 rid_delta;
-		RKVM_READ_REPLAY_VALUE(vcpu, u64, RKVM_RID_STREAM, &rid_delta);
-		vcpu_replaying->next_rid = vcpu_replaying->replayed_rid + rid_delta + 1;
+		if (!RKVM_READ_REPLAY_VALUE(vcpu, u64, RKVM_RID_STREAM, &rid_delta) || (rid_delta == 0)) {
+			disable_replay(vcpu);
+			return true;
+		}
+		vcpu_replaying->next_rid = vcpu_replaying->replayed_rid + rid_delta;
 		RKVM_DEBUG_PRINT(vcpu, "next_rid=%lld\n", vcpu_replaying->next_rid);
 	}
 
@@ -1403,7 +1433,7 @@ static bool rkvm_replaying_on_vcpu_entry(rkvm_vcpu_host *vcpu)
 
 	if (vcpu_replaying->replay_state == REPLAY_UNINITIALIZED) {
 		if (!read_next_replay_target_point(vcpu))
-			vcpu_replaying->replay_state = NO_REPLAY;
+			disable_replay(vcpu);
 	}
 	if (vcpu_data->must_exit) {
 		vcpu_data->must_exit = false;
@@ -1430,12 +1460,12 @@ static void rkvm_replaying_on_vcpu_exit(rkvm_vcpu_host *vcpu, bool internal)
 	u32 exit_reason = ops->userspace_exit_reason(vcpu);
 	u32 original_reason = vcpu_replaying->pending_exitrsn;
 
+	if (is_replay_disabled(vcpu))
+		return;
+
 	if (!vcpu_data->process_exit)
 		return;
 	vcpu_data->process_exit = false;
-
-	if (vcpu_replaying->replay_state == NO_REPLAY)
-		return;
 
 	if (vcpu_replaying->has_internal_exit_reason && (exit_reason == KVM_EXIT_MMIO))
 		internal = true;
@@ -1637,7 +1667,7 @@ static void rkvm_replaying_on_vcpu_exit(rkvm_vcpu_host *vcpu, bool internal)
 	replaying->replayed_rid = vcpu_replaying->replayed_rid = vcpu_replaying->next_rid;
 	RKVM_VCPU_DEBUG_DATA(vcpu)->cnt = vcpu_replaying->replay_read_counter;
 	if (!read_next_replay_target_point(vcpu))
-		vcpu_replaying->replay_state = NO_REPLAY;
+		disable_replay(vcpu);
 }
 
 static bool rkvm_replaying_can_reschedule(rkvm_vcpu_host *vcpu)
@@ -1647,8 +1677,7 @@ static bool rkvm_replaying_can_reschedule(rkvm_vcpu_host *vcpu)
 
 static bool rkvm_replaying_before_inject_rmod_irq(rkvm_vcpu_host *vcpu, int irq)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return true;
 	RKVM_DEBUG_PRINT(vcpu, "REPLAY Not injecting real mode interrupt %d\n", irq);
 	return false;
@@ -1656,8 +1685,7 @@ static bool rkvm_replaying_before_inject_rmod_irq(rkvm_vcpu_host *vcpu, int irq)
 
 static bool rkvm_replaying_after_inject_irq(rkvm_vcpu_host *vcpu, int irq)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return true;
 	RKVM_DEBUG_PRINT(vcpu, "REPLAY Not injecting protected mode interrupt %d\n", irq);
 	return false;
@@ -1665,8 +1693,7 @@ static bool rkvm_replaying_after_inject_irq(rkvm_vcpu_host *vcpu, int irq)
 
 static bool rkvm_replaying_after_inject_nmi(rkvm_vcpu_host *vcpu, int irq)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return true;
 	RKVM_DEBUG_PRINT(vcpu, "REPLAY Not injecting protected mode NMI %d\n", irq);
 	return false;
@@ -1675,8 +1702,7 @@ static bool rkvm_replaying_after_inject_nmi(rkvm_vcpu_host *vcpu, int irq)
 static bool rkvm_replaying_on_pio_in_data_avail(rkvm_vcpu_host *vcpu,
 						void *target, const void *src, int size)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return true;
 	if (!RKVM_READ_REPLAY_DATA(vcpu, RKVM_PIO_STREAM, target, size))
 		return true;
@@ -1685,64 +1711,56 @@ static bool rkvm_replaying_on_pio_in_data_avail(rkvm_vcpu_host *vcpu,
 
 static void rkvm_replaying_on_set_regs(rkvm_vcpu_host *vcpu, void *src, unsigned size)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return;
 	RKVM_READ_CHECK_REPLAY_DATA(vcpu, "regs", RKVM_REGS_STREAM, src, size);
 }
 
 static void rkvm_replaying_on_set_sregs(rkvm_vcpu_host *vcpu, void *src, unsigned size)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return;
 	RKVM_READ_CHECK_REPLAY_DATA(vcpu, "sregs", RKVM_SREGS_STREAM, src, size);
 }
 
 static void rkvm_replaying_on_set_xsave(rkvm_vcpu_host *vcpu, void *src, unsigned size)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return;
 	RKVM_READ_CHECK_REPLAY_DATA(vcpu, "xsave", RKVM_XSAVE_STREAM, src, size);
 }
 
 static void rkvm_replaying_on_set_xcrs(rkvm_vcpu_host *vcpu, void *src, unsigned size)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return;
 	RKVM_READ_CHECK_REPLAY_DATA(vcpu, "xcrs", RKVM_XCRS_STREAM, src, size);
 }
 
 static void rkvm_replaying_on_set_mce(rkvm_vcpu_host *vcpu, void *src, unsigned size)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return;
 	RKVM_READ_CHECK_REPLAY_DATA(vcpu, "mce", RKVM_MCE_STREAM, src, size);
 }
 
 static void rkvm_replaying_on_set_events(rkvm_vcpu_host *vcpu, void *src, unsigned size)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return;
 	RKVM_READ_CHECK_REPLAY_DATA(vcpu, "events", RKVM_EVENTS_STREAM, src, size);
 }
 
 static void rkvm_replaying_on_set_dregs(rkvm_vcpu_host *vcpu, void *src, unsigned size)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return;
 	RKVM_READ_CHECK_REPLAY_DATA(vcpu, "dregs", RKVM_DREGS_STREAM, src, size);
 }
 
 static bool rkvm_replaying_handle_halt(rkvm_vcpu_host *vcpu)
 {
-	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
-	if (vcpu_replaying->replay_state == NO_REPLAY)
+	if (is_replay_disabled(vcpu))
 		return false;
 	/* Halt is noop during replay. */
 	//return true;
@@ -1772,9 +1790,10 @@ static void rkvm_replaying_update(rkvm_vcpu_host *vcpu, const char *debug_info, 
 	s64 pc_to_target = vcpu_replaying->replay_target_point.pc - pc;
 	s32 ecx_to_target = ecx - vcpu_replaying->replay_target_point.ecx;
 
-	switch (initial_replay_state) {
-	case NO_REPLAY:
+	if (is_replay_disabled(vcpu))
 		return;
+
+	switch (initial_replay_state) {
 	case REPLAY_HIT_EVENT:
 		return;
 	default:
