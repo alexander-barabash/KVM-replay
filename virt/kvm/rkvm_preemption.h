@@ -42,7 +42,7 @@ extern u64 rkvm_preemption_get_tsc(rkvm_vcpu_host *vcpu);
 
 extern void rkvm_preemption_update_debug_data(rkvm_vcpu_host *vcpu);
 
-extern void rkvm_preemption_run_free(rkvm_vcpu_host *vcpu, bool on);
+extern void rkvm_preemption_run_free(rkvm_vcpu_host *vcpu, bool on, struct rkvm_local_ops *lops);
 
 
 extern bool kvm_has_preemption_timer;

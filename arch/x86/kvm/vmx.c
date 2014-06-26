@@ -2096,8 +2096,10 @@ static void vmx_queue_exception(struct kvm_vcpu *vcpu, unsigned nr,
 			inc_eip = vcpu->arch.event_exit_inst_len;
 		else if (!rkvm_before_inject_rmod_irq(vcpu, nr))
 			return;
-		if (kvm_inject_realmode_interrupt(vcpu, nr, inc_eip) != EMULATE_DONE)
+		if (kvm_inject_realmode_interrupt(vcpu, nr, inc_eip) != EMULATE_DONE) {
+			printk(KERN_WARNING "kvm_queue_exception Triple fault.\n");
 			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
+		}
 		return;
 	}
 
@@ -4679,8 +4681,10 @@ static void vmx_inject_irq(struct kvm_vcpu *vcpu)
 			inc_eip = vcpu->arch.event_exit_inst_len;
 		else if (!rkvm_before_inject_rmod_irq(vcpu, irq))
 			return;
-		if (kvm_inject_realmode_interrupt(vcpu, irq, inc_eip) != EMULATE_DONE)
+		if (kvm_inject_realmode_interrupt(vcpu, irq, inc_eip) != EMULATE_DONE) {
+			printk(KERN_WARNING "vmx_inject_irq Triple fault.\n");
 			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
+		}
 		return;
 	}
 	intr = irq | INTR_INFO_VALID_MASK;
@@ -4721,8 +4725,10 @@ static void vmx_inject_nmi(struct kvm_vcpu *vcpu)
 	if (vmx->rmode.vm86_active) {
 		if (!rkvm_before_inject_rmod_irq(vcpu, NMI_VECTOR))
 			return;
-		if (kvm_inject_realmode_interrupt(vcpu, NMI_VECTOR, 0) != EMULATE_DONE)
+		if (kvm_inject_realmode_interrupt(vcpu, NMI_VECTOR, 0) != EMULATE_DONE) {
+			printk(KERN_WARNING "vmx_inject_nmi Triple fault.\n");
 			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
+		}
 		return;
 	}
 	if (!rkvm_after_inject_nmi(vcpu, NMI_VECTOR))
@@ -4985,10 +4991,17 @@ static int handle_exception(struct kvm_vcpu *vcpu)
 	switch (ex_no) {
 	case DB_VECTOR:
 		dr6 = vmcs_readl(EXIT_QUALIFICATION);
+		{
+			char buffer[32];
+			sprintf(buffer, "DB_VECTOR dr6=0x%lx", dr6);
+			rkvm_debug_output(vcpu, buffer);
+		}
+return 1;
 		if (!(vcpu->guest_debug &
 		      (KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_USE_HW_BP))) {
 			vcpu->arch.dr6 = dr6 | DR6_FIXED_1;
 			kvm_queue_exception(vcpu, DB_VECTOR);
+			rkvm_debug_output(vcpu, "kvm_queue_exception DB_VECTOR");
 			return 1;
 		}
 		kvm_run->debug.arch.dr6 = dr6 | DR6_FIXED_1;
@@ -5628,9 +5641,14 @@ static int handle_ept_misconfig(struct kvm_vcpu *vcpu)
 	gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
 
 	ret = handle_mmio_page_fault_common(vcpu, gpa, true);
-	if (likely(ret == RET_MMIO_PF_EMULATE))
-		return x86_emulate_instruction(vcpu, gpa, 0, NULL, 0) ==
-					      EMULATE_DONE;
+	if (likely(ret == RET_MMIO_PF_EMULATE)) {
+		int r;
+		r = (x86_emulate_instruction(vcpu, gpa, 0, NULL, 0) ==
+		     EMULATE_DONE);
+		if (r)
+			rkvm_debug_output(vcpu, "emulate_instruction\n");
+		return r;
+	}
 
 	if (unlikely(ret == RET_MMIO_PF_INVALID))
 		return kvm_mmu_page_fault(vcpu, gpa, 0, NULL, 0);
@@ -5737,7 +5755,7 @@ static int handle_invalid_op(struct kvm_vcpu *vcpu)
 
 static int handle_preemption_timer_exit(struct kvm_vcpu *vcpu)
 {
-	int handled = rkvm_on_preemption_timer_exit(vcpu);
+	int handled = rkvm_on_preemption_timer_exit(vcpu, &rkvm_local_ops);
 	if (!handled)
 		vcpu->run->exit_reason = KVM_EXIT_PREEMPTION_TIMER;
 	return handled;
@@ -6194,6 +6212,7 @@ static int handle_vmclear(struct kvm_vcpu *vcpu)
 		 * resulted in this case, so let's shut down before doing any
 		 * more damage:
 		 */
+		printk(KERN_WARNING "nested_get_page Triple fault.\n");
 		kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
 		return 1;
 	}
@@ -7121,6 +7140,7 @@ static void vmx_complete_atomic_exit(struct vcpu_vmx *vmx)
 	/* We need to handle NMIs before interrupts are enabled */
 	if ((exit_intr_info & INTR_INFO_INTR_TYPE_MASK) == INTR_TYPE_NMI_INTR &&
 	    (exit_intr_info & INTR_INFO_VALID_MASK)) {
+		rkvm_debug_output(&vmx->vcpu, "Handling NMI");
 		kvm_before_handle_nmi(&vmx->vcpu);
 		asm("int $2");
 		kvm_after_handle_nmi(&vmx->vcpu);
@@ -7369,7 +7389,8 @@ static inline u64 mask_general_counter(u64 value) {
 }
 
 static inline int rbc_msr_index(void) {
-	return cpu_num_general_counters() - 1;
+	return 0;
+	//return cpu_num_general_counters() - 1;
 }
 
 static inline unsigned rbc_msr(void)
@@ -7445,7 +7466,9 @@ static void vmx_write_preemption_timer_value(u32 value)
 
 static u64 vmx_read_guest_pc(struct kvm_vcpu *vcpu)
 {
-	return kvm_register_read(vcpu, VCPU_REGS_RIP);
+	return
+		vmx_get_segment_base(vcpu, VCPU_SREG_CS) +
+		kvm_rip_read(vcpu);
 }
 
 static u32 vmx_read_guest_ecx(struct kvm_vcpu *vcpu)
@@ -7477,8 +7500,131 @@ static bool vmx_has_internal_exit_reason(struct kvm_vcpu *vcpu)
 	}
 }
 
-static u32 vmx_userspace_exit_reason(struct kvm_vcpu *vcpu) {
+static u32 vmx_userspace_exit_reason(struct kvm_vcpu *vcpu)
+{
 	return vcpu->run->exit_reason;
+}
+
+void vmx_set_rkvm_breakpoint(struct kvm_vcpu *vcpu, u64 pc, u64 *old)
+{
+	/* As per 17.2.5 Intel 64 and IA-32 ASDM. */
+	long LE = 1l << 8;
+	long GE = 1l << 9;
+	long GD = 1l << 13;
+
+#if 0
+	long L0 = 1l << 0;
+	long G0 = 1l << 1;
+	long L1 = 1l << 2;
+	long G1 = 1l << 3;
+	long L2 = 1l << 4;
+	long G2 = 1l << 5;
+#endif
+	long L3 = 1l << 6;
+	long G3 = 1l << 7;
+
+#if 0
+	long length_mask0 = ~(3l << 16);
+	long instr_exec_mask0 = ~(3l << 18);
+	long length_mask1 = ~(3l << 20);
+	long instr_exec_mask1 = ~(3l << 22);
+	long length_mask2 = ~(3l << 24);
+	long instr_exec_mask2 = ~(3l << 26);
+#endif
+	long length_mask3 = ~(3l << 30);
+	long instr_exec_mask3 = ~(3l << 28);
+
+	long dr7 = vmcs_readl(GUEST_DR7);
+
+	dr7 |= LE | GE | GD;
+#if 0
+	dr7 |= L0 | G0;
+	dr7 |= L1 | G1;
+	dr7 |= L2 | G2;
+#endif
+	dr7 |= L3 | G3;
+
+#if 0
+	dr7 &= length_mask0 & instr_exec_mask0;
+	dr7 &= length_mask1 & instr_exec_mask1;
+	dr7 &= length_mask2 & instr_exec_mask2;
+#endif
+	dr7 &= length_mask3 & instr_exec_mask3;
+
+	vmcs_writel(GUEST_DR7, dr7);
+
+	vmcs_set_bits(VM_ENTRY_CONTROLS, VM_ENTRY_LOAD_DEBUG_CONTROLS);
+	vmcs_set_bits(VM_EXIT_CONTROLS, VM_EXIT_SAVE_DEBUG_CONTROLS);
+
+
+	set_debugreg(0, 7);
+	get_debugreg(*old, 3);
+	set_debugreg(pc, 3);
+#if 0
+	set_debugreg(pc - 3, 2);
+	set_debugreg(pc - 2, 1);
+	set_debugreg(pc - 1, 0);
+#endif
+}
+
+void vmx_clear_rkvm_breakpoint(struct kvm_vcpu *vcpu, u64 old)
+{
+	/* As per 17.2.5 Intel 64 and IA-32 ASDM. */
+	long LE = 1l << 8;
+	long GE = 1l << 9;
+	long GD = 1l << 13;
+
+#if 0
+	long L0 = 1l << 0;
+	long G0 = 1l << 1;
+	long L1 = 1l << 2;
+	long G1 = 1l << 3;
+	long L2 = 1l << 4;
+	long G2 = 1l << 5;
+#endif
+	long L3 = 1l << 6;
+	long G3 = 1l << 7;
+
+#if 0
+	long B0 = 1l << 0;
+	long B1 = 1l << 1;
+	long B2 = 1l << 2;
+#endif
+	long B3 = 1l << 3;
+
+	long dr7 = vmcs_readl(GUEST_DR7);
+	long flags = vmx_get_rflags(vcpu);
+	long dr6;
+
+	get_debugreg(dr6, 6);
+#if 0
+	dr6 &= ~B0;
+	dr6 &= ~B1;
+	dr6 &= ~B2;
+#endif
+	dr6 &= ~B3;
+	dr6 |= DR6_FIXED_1;
+	set_debugreg(dr6, 6);
+
+	dr7 &= ~(LE | GE | GD);
+#if 0
+	dr7 &= ~(L0 | G0);
+	dr7 &= ~(L1 | G1);
+	dr7 &= ~(L2 | G2);
+#endif
+	dr7 &= ~(L3 | G3);
+	vmcs_writel(GUEST_DR7, dr7);
+
+	flags |= X86_EFLAGS_RF;
+	vmx_set_rflags(vcpu, flags);
+
+	set_debugreg(0, 7);
+	set_debugreg(old, 3);
+#if 0
+	set_debugreg(0, 2);
+	set_debugreg(0, 1);
+	set_debugreg(0, 0);
+#endif
 }
 
 static void prepare_guest_kept_msrs(struct vcpu_vmx *vmx)
@@ -7574,6 +7720,14 @@ static void vmx_enable_single_step(bool on)
 		vmcs_clear_bits(CPU_BASED_VM_EXEC_CONTROL, CPU_BASED_MTF_EXITING);
 }
 
+static bool vmx_mov_ss_blocks_interrupts(void)
+{
+	long interruptability_info = vmcs_read32(GUEST_INTERRUPTIBILITY_INFO);
+	return
+		((interruptability_info & KVM_X86_SHADOW_INT_MOV_SS) != 0) ||
+		((interruptability_info & KVM_X86_SHADOW_INT_STI) != 0);
+}
+
 static bool vmx_read_hw_intr_info(int *int_vec)
 {
 	u32 value = vmcs_read32(VM_ENTRY_INTR_INFO_FIELD);
@@ -7632,8 +7786,10 @@ static void vmx_inject_external_realmod_int(struct kvm_vcpu *vcpu, int int_vec)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	if (vmx->rmode.vm86_active) {
-		if (kvm_inject_realmode_interrupt(vcpu, int_vec, 0) != EMULATE_DONE)
+		if (kvm_inject_realmode_interrupt(vcpu, int_vec, 0) != EMULATE_DONE) {
+			printk(KERN_WARNING "vmx_inject_external_realmod_int Triple fault.\n");
 			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
+		}
 	}
 }
 
@@ -7670,10 +7826,20 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 		vmx_set_interrupt_shadow(vcpu, 0);
 
 	rkvm_on_vmentry(vcpu, &rkvm_local_ops);
+	{
+		char dbbuf[100];
+		sprintf(dbbuf, "VM_ENTRY_INTR_INFO_FIELD=0x%x",
+			vmcs_read32(VM_ENTRY_INTR_INFO_FIELD));
+		rkvm_debug_output(vcpu, dbbuf);
+		sprintf(dbbuf, "GUEST_INTERRUPTIBILITY_INFO=0x%x",
+			vmcs_read32(GUEST_INTERRUPTIBILITY_INFO));
+		rkvm_debug_output(vcpu, dbbuf);
+	}
 
 	atomic_switch_perf_msrs(vmx);
 	prepare_guest_kept_msrs(vmx);
 	debugctlmsr = get_debugctlmsr();
+#if 1
 	if (rkvm_recording_or_replaying(vcpu->kvm)) {
 		vmcs_write64(GUEST_IA32_DEBUGCTL,
 			     vmcs_read64(GUEST_IA32_DEBUGCTL) |
@@ -7681,7 +7847,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 		update_debugctlmsr(debugctlmsr |
 				   DEBUGCTLMSR_FREEZE_WHILE_SMM_EN);
 	}
-	
+#endif	
 
 	vmx->__launched = vmx->loaded_vmcs->launched;
 	asm(
@@ -7826,6 +7992,15 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 		       is_nmi_interrupt(vmx->idt_vectoring_info),
 		       vmx->exit_reason,
 		       &rkvm_local_ops);
+	{
+		char dbbuf[100];
+		sprintf(dbbuf, "VM_EXIT_INTR_INFO=0x%x",
+			vmcs_read32(VM_EXIT_INTR_INFO));
+		rkvm_debug_output(vcpu, dbbuf);
+		sprintf(dbbuf, "GUEST_INTERRUPTIBILITY_INFO=0x%x",
+			vmcs_read32(GUEST_INTERRUPTIBILITY_INFO));
+		rkvm_debug_output(vcpu, dbbuf);
+	}
 
  	vmx_complete_atomic_exit(vmx);
 	vmx_recover_nmi_blocking(vmx);
@@ -8847,6 +9022,7 @@ static struct rkvm_local_ops rkvm_local_ops = {
 	.setup_preemption_timer = vmx_setup_preemption_timer,
 	.save_preemption_timer_on_exit = vmx_save_preemption_timer_on_exit,
 	.enable_single_step = vmx_enable_single_step,
+	.mov_ss_blocks_interrupts = vmx_mov_ss_blocks_interrupts,
 	.ensure_rdtsc_exiting = vmx_ensure_rdtsc_exiting,
 	.disable_pending_virtual_intr = vmx_disable_pending_virtual_intr,
 	.disable_host_pmc_counters = vmx_disable_host_pmc_counters,
@@ -8861,6 +9037,9 @@ static struct rkvm_local_ops rkvm_local_ops = {
 	.make_apic_deliver_nmi_on_pmi = vmx_make_apic_deliver_nmi_on_pmi,
 	.read_preemption_timer_value = vmx_read_preemption_timer_value,
 	.write_preemption_timer_value = vmx_write_preemption_timer_value,
+
+	.set_rkvm_breakpoint = vmx_set_rkvm_breakpoint,
+	.clear_rkvm_breakpoint = vmx_clear_rkvm_breakpoint,
 };
 
 static struct rkvm_ops rkvm_ops = {

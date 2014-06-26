@@ -25,6 +25,7 @@ struct rkvm_local_ops {
 	void (*setup_preemption_timer)(bool on);
 	void (*save_preemption_timer_on_exit)(bool on);
 	void (*enable_single_step)(bool on);
+	bool (*mov_ss_blocks_interrupts)(void);
 	void (*ensure_rdtsc_exiting)(void);
 	void (*disable_pending_virtual_intr)(void);
 	void (*disable_host_pmc_counters)(void);
@@ -39,6 +40,9 @@ struct rkvm_local_ops {
 	void (*make_apic_deliver_nmi_on_pmi)(void);
 	u32 (*read_preemption_timer_value)(void);
 	void (*write_preemption_timer_value)(u32 value);
+
+	void (*set_rkvm_breakpoint)(rkvm_vcpu_host *vcpu, u64 pc, u64 *old);
+	void (*clear_rkvm_breakpoint)(rkvm_vcpu_host *vcpu, u64 old);
 };
 
 struct rkvm_ops {
@@ -60,6 +64,8 @@ struct rkvm_vcpu_data;
 struct rkvm_vcpu_preemption;
 
 #define RKVM_HOST(vcpu) ((vcpu)->kvm)
+
+extern void rkvm_debug_output(rkvm_vcpu_host *vcpu, const char *s);
 
 extern bool kvm_enable_preemption_timer(rkvm_vcpu_host *vcpu);
 extern bool rkvm_preempting(rkvm_host *host);
@@ -116,7 +122,7 @@ extern bool rkvm_replay_tsc(rkvm_vcpu_host *vcpu, u64 *out_tsc_value);
 extern int rkvm_set_timer_quantum(rkvm_host *host, u32 preemption_timer_quantum);
 extern u32 rkvm_get_timer_quantum(rkvm_host *host);
 
-extern int rkvm_on_preemption_timer_exit(rkvm_vcpu_host *vcpu);
+extern int rkvm_on_preemption_timer_exit(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops);
 
 extern int rkvm_set_execution_flag(rkvm_host *host, u32 execution_mode);
 extern int rkvm_clear_execution_flag(rkvm_host *host, u32 execution_mode);

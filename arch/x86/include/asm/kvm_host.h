@@ -823,7 +823,11 @@ int x86_emulate_instruction(struct kvm_vcpu *vcpu, unsigned long cr2,
 static inline int emulate_instruction(struct kvm_vcpu *vcpu,
 			int emulation_type)
 {
-	return x86_emulate_instruction(vcpu, 0, emulation_type, NULL, 0);
+	int r = x86_emulate_instruction(vcpu, 0, emulation_type, NULL, 0);
+	if (r == EMULATE_DONE) {
+		rkvm_debug_output(vcpu, "emulate_instruction\n");
+	}
+	return r;
 }
 
 void kvm_enable_efer_bits(u64);

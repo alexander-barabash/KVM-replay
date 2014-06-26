@@ -133,7 +133,6 @@ void rkvm_preemption_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lop
 	lops->setup_preemption_timer(true);
 	lops->write_preemption_timer_value(vcpu_preemption->entry_preemption_timer);
 	lops->save_preemption_timer_on_exit(true);
-	lops->ensure_rdtsc_exiting();
 }
 
 void rkvm_preemption_on_vmexit(rkvm_vcpu_host *vcpu, struct rkvm_userspace_data *userspace,
@@ -358,9 +357,12 @@ void rkvm_preemption_update_debug_data(rkvm_vcpu_host *vcpu)
 	debug->accumulate_preemption_timer = vcpu_preemption->accumulate_preemption_timer;
 }
 
-void rkvm_preemption_run_free(rkvm_vcpu_host *vcpu, bool on)
+void rkvm_preemption_run_free(rkvm_vcpu_host *vcpu, bool on, struct rkvm_local_ops *lops)
 {
 	struct rkvm_vcpu_preemption *vcpu_preemption = RKVM_VCPU_PREEMPTION(vcpu);
 	vcpu_preemption->run_free = on;
+	if (on) {
+		vcpu_preemption->entry_preemption_timer = 0x70000000u;
+		lops->write_preemption_timer_value(vcpu_preemption->entry_preemption_timer);
+	}
 }
-

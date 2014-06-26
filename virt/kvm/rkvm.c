@@ -170,7 +170,7 @@ static int do_rkvm_xfer(rkvm_host *host, struct rkvm_xfer *rkvm_xfer, bool recor
 		atomic_set(&update_rkvm_data->mode, rkvm_mode);		\
 	} while (0)
 
-#define RKVM_DEBUG_PRINT(vcpu, ...)					\
+#define RKVM_DEBUG_PRINT_FULL(vcpu, ...)				\
 	do {								\
 		static int spill_counter = 0;				\
 		char debug_print_buffer[256];				\
@@ -193,6 +193,13 @@ static int do_rkvm_xfer(rkvm_host *host, struct rkvm_xfer *rkvm_xfer, bool recor
 			}						\
 		}							\
 	} while (false)
+
+#define RKVM_DEBUG_PRINT_NULL(vcpu, ...)				\
+	do {								\
+	} while (false)
+
+
+#define RKVM_DEBUG_PRINT(...) RKVM_DEBUG_PRINT_FULL(__VA_ARGS__)
 
 #define RKVM_RECORD_VALUE(vcpu, type, stream, value)			\
 	bscript_write_##type(get_record_bstream(vcpu, stream), value)
@@ -345,6 +352,19 @@ static inline bool is_replay_disabled(rkvm_vcpu_host *vcpu)
 	return vcpu_replaying->replay_disabled;
 }
 
+static inline bool setup_immediate_exit(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops)
+{
+	struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
+	RKVM_DEBUG_PRINT(vcpu, "Immediate exit.\n");
+	vcpu_data->must_exit = true;
+	rkvm_preemption_run_free(vcpu, true, lops);
+	if (lops->inject_immediate_exit())
+		vcpu_data->exit_immediately = true;
+	else
+		RKVM_DEBUG_PRINT(vcpu, "FAILED to inject immediate exit\n");
+	return vcpu_data->exit_immediately;
+}
+
 static int on_rkvm_xfer(rkvm_host *host, struct rkvm_xfer *rkvm_xfer)
 {
 	int r = 0;
@@ -374,12 +394,6 @@ static int on_rkvm_xfer(rkvm_host *host, struct rkvm_xfer *rkvm_xfer)
 	do_xfer = true;
 	spin_lock(&rkvm_data->lockstep_spinlock);
 	if (replay) {
-		RKVM_DEBUG_PRINT(dma_vcpu, 
-				 "on_rkvm_xfer: %d bytes next_rid=%lld DMA rid=%lld GLOBAL rid=%lld\n",
-				 rkvm_xfer->size,
-				 (long long)dma_replaying->next_rid,
-				 (long long)dma_replaying->replayed_rid,
-				 (long long)replaying->replayed_rid);
 		if (dma_replaying->next_rid == dma_replaying->replayed_rid) {
 			u64 rid_delta;
 			if (RKVM_READ_REPLAY_VALUE(dma_vcpu, u64, RKVM_RID_STREAM, &rid_delta) && (rid_delta != 0)) {
@@ -393,11 +407,6 @@ static int on_rkvm_xfer(rkvm_host *host, struct rkvm_xfer *rkvm_xfer)
 			
 		if (dma_replaying->next_rid != replaying->replayed_rid + 1) {
 			do_xfer = false;
-			RKVM_DEBUG_PRINT(dma_vcpu, 
-					 "NO TRANSFER: on_rkvm_xfer: %d bytes next_rid=%lld GLOBAL rid=%lld\n",
-					 rkvm_xfer->size,
-					 (long long)dma_replaying->next_rid,
-					 (long long)replaying->replayed_rid);
 		} else {
 			RKVM_DEBUG_PRINT(dma_vcpu, 
 					 "on_rkvm_xfer: %d bytes rid=%lld\n",
@@ -481,8 +490,10 @@ void rkvm_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops)
 	bool preempt, record, replay, lock_step;
 	EXTRACT_VCPU_MODE(vcpu);
 
-	vcpu_data->vmentry_guest_pc = ops->read_guest_pc(vcpu);
-	vcpu_data->vmentry_guest_ecx = ops->read_guest_ecx(vcpu);
+	if (record || replay) {
+		vcpu_data->vmentry_guest_pc = ops->read_guest_pc(vcpu);
+		vcpu_data->vmentry_guest_ecx = ops->read_guest_ecx(vcpu);
+	}
 
 	if (preempt)
 		rkvm_preemption_on_vmentry(vcpu, lops);
@@ -490,6 +501,20 @@ void rkvm_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops)
 		rkvm_recording_on_vmentry(vcpu, lops);
 	if (replay)
 		rkvm_replaying_on_vmentry(vcpu, lops);
+
+	if (record || replay || preempt)
+		lops->ensure_rdtsc_exiting();
+		
+	if (record || replay) {
+		vcpu_data->entry_rbc = ops->read_rbc(vcpu);
+		lops->disable_host_pmc_counters();
+	}
+
+	if (vcpu_data->single_stepping) {
+		RKVM_DEBUG_PRINT(vcpu, "single stepping\n");
+		lops->enable_single_step(true);
+		rkvm_preemption_run_free(vcpu, true, lops);
+	}
 }
 EXPORT_SYMBOL_GPL(rkvm_on_vmentry);
 
@@ -505,8 +530,28 @@ void rkvm_on_vmexit(rkvm_vcpu_host *vcpu,
 	bool preempt, record, replay, lock_step;
 	EXTRACT_VCPU_MODE(vcpu);
 
-	vcpu_data->vmexit_guest_pc = ops->read_guest_pc(vcpu);
-	vcpu_data->vmexit_guest_ecx = ops->read_guest_ecx(vcpu);
+	if (record || replay) {
+		vcpu_data->vmexit_guest_pc = ops->read_guest_pc(vcpu);
+		vcpu_data->vmexit_guest_ecx = ops->read_guest_ecx(vcpu);
+		vcpu_data->exit_rbc = ops->read_rbc(vcpu);
+		if ((!vcpu_data->single_stepping && !vcpu_data->exit_immediately) ||
+		    (vcpu_data->vmexit_guest_pc != vcpu_data->vmentry_guest_pc))
+			vcpu_data->accumulate_rbc += vcpu_data->exit_rbc - vcpu_data->entry_rbc;
+	}
+
+	if (vcpu_data->exit_immediately) {
+		vcpu_data->exit_immediately = false;
+		lops->clear_immediate_exit();
+		rkvm_preemption_run_free(vcpu, false, lops);
+	}
+
+	if (vcpu_data->single_stepping) {
+		if (exit_reason < 0) {
+		}
+		vcpu_data->single_stepping = false;
+		lops->enable_single_step(false);
+		rkvm_preemption_run_free(vcpu, false, lops);
+	}
 
 	if (preempt)
 		rkvm_preemption_on_vmexit(vcpu, &rkvm_data->userspace, lops);
@@ -514,6 +559,7 @@ void rkvm_on_vmexit(rkvm_vcpu_host *vcpu,
 		rkvm_recording_on_vmexit(vcpu, reinject_external_interrupt, exit_reason, lops);
 	if (replay)
 		rkvm_replaying_on_vmexit(vcpu, reinject_external_interrupt, exit_reason, lops);
+
 }
 EXPORT_SYMBOL_GPL(rkvm_on_vmexit);
 
@@ -823,7 +869,7 @@ static void rkvm_record_pending_vmexit(rkvm_vcpu_host *vcpu)
 	cnt = ++vcpu_recording->record_write_counter;
 
 	RKVM_DEBUG_PRINT(vcpu, "rid=%lld rsn=%d",
-			 recording->recorded_rid + 1, rsn);
+			 recording->recorded_rid, rsn);
 
 	switch (rsn) {
 	case RKVM_NO_RSN:
@@ -881,7 +927,7 @@ static void rkvm_lockstep_unlock(rkvm_vcpu_host *vcpu)
 	struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 
-	if (vcpu_data->lockstep_owner) {
+	if (vcpu_data->lockstep_owner && !vcpu_data->make_one_more_step) {
 		bool preempt, record, replay, lock_step;
 		EXTRACT_VCPU_MODE(vcpu);
 
@@ -899,6 +945,8 @@ bool rkvm_on_vcpu_entry(rkvm_vcpu_host *vcpu)
 
 	bool preempt, record, replay, lock_step;
 	EXTRACT_VCPU_MODE(vcpu);
+
+	vcpu->run->exit_reason = KVM_EXIT_UNKNOWN;
 
 	if (unlikely(!vcpu_data->launched)) {
 		vcpu_data->launched = true;
@@ -992,8 +1040,8 @@ void rkvm_handle_external_interrupt(rkvm_vcpu_host *vcpu)
 	EXTRACT_VCPU_MODE(vcpu);
 #if 0
 	if (record) {
-		struct rkvm_vcpu_recording *vcpu_recording = RKVM_VCPU_RECORDING(vcpu);
-		vcpu_recording->make_one_more_step = true;
+		struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
+		vcpu_data->make_one_more_step = true;
 	}
 #endif
 }
@@ -1043,9 +1091,15 @@ static void rkvm_recording_on_vcpu_exit(rkvm_vcpu_host *vcpu, bool internal)
 		return;
 	vcpu_data->process_exit = false;
 
+	if (vcpu_data->make_one_more_step)
+		return;
+
 	recording->recorded_rid++;
 	RKVM_RECORD_VALUE(vcpu, u64, RKVM_RID_STREAM, recording->recorded_rid - vcpu_recording->recorded_rid);
 	vcpu_recording->recorded_rid = recording->recorded_rid;
+
+	if (vcpu_recording->has_internal_exit_reason && (exitrsn == KVM_EXIT_MMIO))
+		internal = true;
 
 	if (!internal) {
 		switch (exitrsn) {
@@ -1081,8 +1135,8 @@ static void rkvm_recording_on_vcpu_exit(rkvm_vcpu_host *vcpu, bool internal)
 
 static bool rkvm_recording_can_reschedule(rkvm_vcpu_host *vcpu)
 {
-	struct rkvm_vcpu_recording *vcpu_recording = RKVM_VCPU_RECORDING(vcpu);
-	return !vcpu_recording->make_one_more_step;
+	struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
+	return !vcpu_data->make_one_more_step;
 }
 
 static void rkvm_recording_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops)
@@ -1096,18 +1150,17 @@ static void rkvm_recording_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_op
 
 	vcpu_recording->has_internal_exit_reason = false;
 	
-	if (vcpu_recording->make_one_more_step) {
-		if (!lops->inject_immediate_exit())
-			RKVM_DEBUG_PRINT(vcpu, "FAILED to inject immediate exit\n");
+	if (vcpu_data->make_one_more_step) {
+		vcpu_data->make_one_more_step = false;
+		//setup_immediate_exit(vcpu, lops);
+		vcpu_data->single_stepping = true;
+		vcpu_data->must_exit = true;
 	}
 
-	lops->disable_host_pmc_counters();
 	if (lops->read_hw_intr_info(&irq))
 		rkvm_prerecord_irq_point(vcpu, RKVM_RSN_PROTECTED_MOD_IRQ, irq);
 	else if (lops->read_nmi_intr_info(&irq))
 		rkvm_prerecord_irq_point(vcpu, RKVM_RSN_PROTECTED_MOD_NMI, irq);
-
-	vcpu_data->entry_rbc = ops->read_rbc(vcpu);
 }
 
 static void rkvm_recording_on_vmexit(rkvm_vcpu_host *vcpu,
@@ -1121,15 +1174,7 @@ static void rkvm_recording_on_vmexit(rkvm_vcpu_host *vcpu,
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	struct rkvm_ops *ops = rkvm_data->ops;
 
-	vcpu_recording->has_internal_exit_reason = ops->has_internal_exit_reason(vcpu);
-
-	if (vcpu_recording->make_one_more_step) {
-		vcpu_recording->make_one_more_step = false;
-		vcpu_data->must_exit = true;
-		rkvm_preemption_run_free(vcpu, false);
-		lops->clear_immediate_exit();
-	}
-	vcpu_data->accumulate_rbc += ops->read_rbc(vcpu) - vcpu_data->entry_rbc;
+	vcpu_recording->has_internal_exit_reason = false; // ops->has_internal_exit_reason(vcpu);
 
 	RKVM_DEBUG_PRINT(vcpu, "Exit %d. pc=0x%llx ecx=0x%x rbc=%lld\n",
 			 exit_reason,
@@ -1222,11 +1267,12 @@ static void rkvm_recording_on_set_dregs(rkvm_vcpu_host *vcpu, void *src, unsigne
 
 static bool rkvm_recording_handle_halt(rkvm_vcpu_host *vcpu)
 {
+	RKVM_DEBUG_PRINT(vcpu, "HALT\n");
 	return false;
 }
 
 
-static s64 rbc_threshold = 32;
+static s64 rbc_threshold = 64;
 
 static void rkvm_replaying_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops)
 {
@@ -1235,107 +1281,161 @@ static void rkvm_replaying_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_op
 	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	struct rkvm_ops *ops = rkvm_data->ops;
-	u64 rbc;
-	u64 new_rbc = rbc_threshold + vcpu_data->accumulate_rbc - vcpu_replaying->replay_target_point.rbc;
-	bool single_step = false;
+	s64 new_rbc = rbc_threshold + vcpu_data->accumulate_rbc - vcpu_replaying->replay_target_point.rbc;
+	bool set_bp = false;
+	bool set_pmi = false;
+	bool immediate_exit = false;
+
+	/* TESTING. Depends on setting breakpoint with PMI */
+	//new_rbc = 1 + vcpu_data->accumulate_rbc - vcpu_replaying->replay_target_point.rbc;
+	/* END TESTING. */
 
 	if (is_replay_disabled(vcpu)) {
 		if (vcpu_replaying->need_replay_cleanup) {
 			vcpu_replaying->need_replay_cleanup = false;
-			lops->enable_single_step(false);
+			if (vcpu_replaying->has_breakpoint) {
+				lops->clear_rkvm_breakpoint(vcpu, vcpu_replaying->old_bp_value);
+				vcpu_replaying->has_breakpoint = false;
+			}
 		}
 		return;
 	}
 
 	vcpu_replaying->has_internal_exit_reason = false;
 
-	if (lops->clear_rbc_pmi()) {
-		rbc = 0;
+	if (lops->clear_rbc_pmi())
 		ops->set_rbc(vcpu, 0);
-	} else {
-		rbc = ops->read_rbc(vcpu);
-	}
 
 	rkvm_replaying_update(vcpu, "Before vmentry: ",
 			      vcpu_data->vmentry_guest_pc, vcpu_data->vmentry_guest_ecx);
 
+ restart:
 	switch (vcpu_replaying->replay_state) {
+	case REPLAY_SINGLE_STEP:
+ 		/* TEST */ 
 	case REPLAY_WAIT_FOR_PMI:
 		if ((vcpu_replaying->replay_sync_reason == RKVM_RSN_VCPU_EXIT) &&
 		    is_synchronous_exit_reason(vcpu_replaying->pending_exitrsn))
 			break;
-		if ((s64)new_rbc < 0) {
-			if (rbc != new_rbc) {
-				rbc = new_rbc;
-				ops->set_rbc(vcpu, rbc);
-				RKVM_DEBUG_PRINT(vcpu,
-						 "wait for PMI at %lld branches\n",
-						 (long long)rbc);
-				lops->make_apic_deliver_nmi_on_pmi();
+		if (new_rbc < 0) {
+			if (vcpu_replaying->accumulate_rbc_delta < 0) {
+				new_rbc -= vcpu_replaying->accumulate_rbc_delta;
 			}
-			break;
+			if (new_rbc < 0) {
+				set_pmi = true;
+				/* TODO : Need a smart algorithm here. */
+				if (new_rbc > -2 * rbc_threshold)
+					set_bp = true;
+				break;
+			} else {
+				new_rbc -= rbc_threshold - 1;
+				if (new_rbc < 0) {
+					set_pmi = true;
+					set_bp = true;
+					break;
+				}
+			}
+		} else {
+			new_rbc -= rbc_threshold - 1;
+			if (new_rbc < 0) {
+				if (vcpu_replaying->accumulate_rbc_delta < 0) {
+					new_rbc -= vcpu_replaying->accumulate_rbc_delta;
+				}
+				if (new_rbc < 0) {
+					set_pmi = true;
+					set_bp = true;
+					break;
+				}
+			}
 		}
 		vcpu_replaying->replay_state = REPLAY_SINGLE_STEP;
 		/* fallthru */
-	case REPLAY_SINGLE_STEP:
+		// TEST OUT: case REPLAY_SINGLE_STEP:
 		if ((vcpu_replaying->replay_sync_reason == RKVM_RSN_VCPU_EXIT) &&
 		    is_synchronous_exit_reason(vcpu_replaying->pending_exitrsn))
 			break;
-		single_step = true;
-		RKVM_DEBUG_PRINT(vcpu, "single stepping\n");
+
+		if (vcpu_data->vmentry_guest_pc != vcpu_replaying->replay_target_point.pc) {
+#if 0
+			s64 pc_to_target = vcpu_replaying->replay_target_point.pc - vcpu_data->vmentry_guest_pc;
+			if ((pc_to_target > 0) && (pc_to_target < 16))
+				vcpu_data->single_stepping = true;
+			else
+#endif
+				set_bp = true;
+		} else if (vcpu_replaying->replay_target_point.rbc > vcpu_data->accumulate_rbc)
+			set_bp = true;
+		else if (vcpu_data->vmentry_guest_pc <= vcpu_replaying->replay_target_point.ecx) {
+			vcpu_replaying->replay_state = REPLAY_HIT_EVENT;
+			goto restart;
+		} else
+			vcpu_data->single_stepping = true;
 		break;
 	case REPLAY_NEW_TARGET:
 		RKVM_DEBUG_PRINT(vcpu, "ERROR: rkvm_replaying_on_vmentry: REPLAY_NEW_TARGET\n");
-		/* TODO: Is it even possible? */
 		break;
 	case REPLAY_UNINITIALIZED:
 		RKVM_DEBUG_PRINT(vcpu, "ERROR: rkvm_replaying_on_vmentry: REPLAY_UNINITIALIZED\n");
-		/* TODO: Is it even possible? */
 		break;
 	case REPLAY_HIT_EVENT:
 		switch (vcpu_replaying->replay_sync_reason) {
 		case RKVM_NO_RSN:
-			/* TODO: Is it even possible? */
-			RKVM_DEBUG_PRINT(vcpu, "IMPOSSIBLE: event hit : no reason\n");
+			RKVM_DEBUG_PRINT(vcpu, "ERROR: event hit : no reason\n");
 			break;
 		case RKVM_RSN_VCPU_EXIT:
-			if (!is_synchronous_exit_reason(vcpu_replaying->pending_exitrsn)) {
-				vcpu_data->must_exit = true;
-				vcpu_data->exit_immediately = true;
-				RKVM_DEBUG_PRINT(vcpu, "event hit : exit immediately\n");
-				if (!lops->inject_immediate_exit())
-					RKVM_DEBUG_PRINT(vcpu, "FAILED to inject immediate exit\n");
-			}
+			if (!is_synchronous_exit_reason(vcpu_replaying->pending_exitrsn))
+				immediate_exit = true;
 			break;
 		case RKVM_RSN_REAL_MOD_IRQ:
 			RKVM_DEBUG_PRINT(vcpu, "Injecting real mode interrupt %d\n",
 					 vcpu_replaying->pending_irq);
 			ops->inject_external_realmod_int(vcpu, vcpu_replaying->pending_irq);
-			single_step = true;
+			vcpu_data->single_stepping = true;
 			break;
 		case RKVM_RSN_PROTECTED_MOD_IRQ:
 			RKVM_DEBUG_PRINT(vcpu, "Injecting protected mode interrupt %d\n",
 					 vcpu_replaying->pending_irq);
 			lops->set_hw_intr_info(vcpu_replaying->pending_irq);
-			single_step = true;
+			vcpu_data->single_stepping = true;
 			break;
 		case RKVM_RSN_PROTECTED_MOD_NMI:
 			RKVM_DEBUG_PRINT(vcpu, "Injecting protected mode NMI %d\n",
 					 vcpu_replaying->pending_irq);
 			lops->set_nmi_intr_info(vcpu_replaying->pending_irq);
-			single_step = true;
+			vcpu_data->single_stepping = true;
 			break;
 		}
 		break;
 	}
 
-	lops->disable_host_pmc_counters();
-	lops->enable_single_step(single_step);
-	lops->disable_pending_virtual_intr();
-	lops->ensure_rdtsc_exiting();
-	vcpu_data->entry_rbc = rbc;
+	if (immediate_exit)
+		setup_immediate_exit(vcpu, lops);
 
-	return;
+#if 0
+	//// TEMPORARY
+	if (vcpu_replaying->replay_read_counter == 349019) {
+		vcpu_data->single_stepping = true;
+	}
+#endif
+	////////////////
+	if (set_pmi) {
+		if (vcpu_data->exit_rbc != (u64)new_rbc)
+			ops->set_rbc(vcpu, new_rbc);
+		RKVM_DEBUG_PRINT(vcpu,
+				 "wait for PMI at %lld branches\n",
+				 (long long)new_rbc);
+		lops->make_apic_deliver_nmi_on_pmi();
+	} else {
+		ops->set_rbc(vcpu, 0);
+	}
+	if (set_bp) {
+		RKVM_DEBUG_PRINT(vcpu, "Breakpoint at 0x%llx\n",
+				 vcpu_replaying->replay_target_point.pc);
+		lops->set_rkvm_breakpoint(vcpu, vcpu_replaying->replay_target_point.pc,
+					  &vcpu_replaying->old_bp_value);
+		vcpu_replaying->has_breakpoint = true;
+	}
+	//lops->disable_pending_virtual_intr();
 }
 
 static void rkvm_replaying_on_vmexit(rkvm_vcpu_host *vcpu,
@@ -1352,19 +1452,19 @@ static void rkvm_replaying_on_vmexit(rkvm_vcpu_host *vcpu,
 	if (is_replay_disabled(vcpu))
 		return;
 
-	if (vcpu_data->exit_immediately) {
-		vcpu_data->exit_immediately = false;
-		lops->clear_immediate_exit();
+	if (vcpu_replaying->has_breakpoint) {
+		lops->clear_rkvm_breakpoint(vcpu, vcpu_replaying->old_bp_value);
+		vcpu_replaying->has_breakpoint = false;
 	}
 
-	vcpu_replaying->has_internal_exit_reason = ops->has_internal_exit_reason(vcpu);
+	vcpu_replaying->has_internal_exit_reason = false; // ops->has_internal_exit_reason(vcpu);
 
-	vcpu_data->accumulate_rbc += ops->read_rbc(vcpu) - vcpu_data->entry_rbc;
 	has_pmi = lops->has_rbc_pmi();
 
-	RKVM_DEBUG_PRINT(vcpu, "Exit %d%s. pc=0x%llx ecx=0x%x rbc=%lld d=%lld\n",
+	RKVM_DEBUG_PRINT(vcpu, "Exit %d%s exit_rbc=%lld. pc=0x%llx ecx=0x%x rbc=%lld d=%lld\n",
 			 exit_reason,
 			 has_pmi ? " (has PMI)" : "",
+			 (long long)vcpu_data->exit_rbc,
 			 (long long)ops->read_guest_pc(vcpu),
 			 ops->read_guest_ecx(vcpu),
 			 (long long)vcpu_data->accumulate_rbc,
@@ -1401,6 +1501,7 @@ static void rkvm_replaying_vcpu_halted(rkvm_vcpu_host *vcpu)
 {
 	struct rkvm_vcpu_replaying *vcpu_replaying = RKVM_VCPU_REPLAYING(vcpu);
 
+	RKVM_DEBUG_PRINT(vcpu, "HALTED\n");
 	vcpu_replaying->vcpu_halted = true;
 }
 
@@ -1452,6 +1553,7 @@ static void rkvm_replaying_on_vcpu_exit(rkvm_vcpu_host *vcpu, bool internal)
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);
 	struct rkvm_replaying *replaying = RKVM_REPLAYING(host);
 	struct rkvm_ops *ops = rkvm_data->ops;
+	bool good;
 	bool unplanned = false;
 	bool natural = false;
 	bool technical = false;
@@ -1536,21 +1638,52 @@ static void rkvm_replaying_on_vcpu_exit(rkvm_vcpu_host *vcpu, bool internal)
 			{
 				u32 len;
 				u64 phys_addr;
-				if (RKVM_READ_REPLAY_VALUE(vcpu, u32, RKVM_MMIOSIZ_STREAM, &len)) {
-					if (vcpu->run->mmio.len != len)
-						RKVM_DEBUG_PRINT(vcpu, "Mismatched MMIO len: %d and not %d\n",
-								 vcpu->run->mmio.len, len);
+				if (vcpu->run->mmio.is_write) {
+					if (RKVM_READ_REPLAY_VALUE(vcpu, u32, RKVM_MMIOSIZ_STREAM, &len)) {
+						if (vcpu->run->mmio.len != len)
+							RKVM_DEBUG_PRINT(vcpu, "Mismatched MMIOW len: %d and not %d\n",
+									 vcpu->run->mmio.len, len);
+						else
+							RKVM_DEBUG_PRINT(vcpu, "Recorded MMIOW of len: %d\n",
+									 vcpu->run->mmio.len);
+					} else {
+						RKVM_DEBUG_PRINT(vcpu, "Unrecorded MMIOW of len %d\n", vcpu->run->mmio.len);
+					}
+					if (RKVM_READ_REPLAY_VALUE(vcpu, u64, RKVM_MMIOADR_STREAM, &phys_addr)) {
+						if (vcpu->run->mmio.phys_addr != phys_addr)
+							RKVM_DEBUG_PRINT(vcpu, "Mismatched MMIOW address: 0x%llx and not 0x%llx\n",
+									 (long long)vcpu->run->mmio.phys_addr,
+									 (long long)phys_addr);
+						else
+							RKVM_DEBUG_PRINT(vcpu, "Recorded MMIOW to address: 0x%llx\n",
+									 (long long)vcpu->run->mmio.phys_addr);
+					} else {
+						RKVM_DEBUG_PRINT(vcpu, "Unrecorded MMIOW to address 0x%llx\n",
+								 (long long)vcpu->run->mmio.phys_addr);
+					}
 				} else {
-					RKVM_DEBUG_PRINT(vcpu, "Unrecorded MMIO of len %d\n", vcpu->run->mmio.len);
-				}
-				if (RKVM_READ_REPLAY_VALUE(vcpu, u64, RKVM_MMIOADR_STREAM, &phys_addr)) {
-					if (vcpu->run->mmio.phys_addr != phys_addr)
-						RKVM_DEBUG_PRINT(vcpu, "Mismatched MMIO address: 0x%llx and not 0x%llx\n",
-								 (long long)vcpu->run->mmio.phys_addr,
-								 (long long)phys_addr);
-				} else {
-					RKVM_DEBUG_PRINT(vcpu, "Unrecorded MMIO to address 0x%llx\n",
-							 (long long)vcpu->run->mmio.phys_addr);
+					if (RKVM_READ_REPLAY_VALUE(vcpu, u32, RKVM_MMIOSIZ_STREAM, &len)) {
+						if (vcpu->run->mmio.len != len)
+							RKVM_DEBUG_PRINT(vcpu, "Mismatched MMIOR len: %d and not %d\n",
+									 vcpu->run->mmio.len, len);
+						else
+							RKVM_DEBUG_PRINT(vcpu, "Recorded MMIOR of len: %d\n",
+									 vcpu->run->mmio.len);
+					} else {
+						RKVM_DEBUG_PRINT(vcpu, "Unrecorded MMIOR of len %d\n", vcpu->run->mmio.len);
+					}
+					if (RKVM_READ_REPLAY_VALUE(vcpu, u64, RKVM_MMIOADR_STREAM, &phys_addr)) {
+						if (vcpu->run->mmio.phys_addr != phys_addr)
+							RKVM_DEBUG_PRINT(vcpu, "Mismatched MMIOR address: 0x%llx and not 0x%llx\n",
+									 (long long)vcpu->run->mmio.phys_addr,
+									 (long long)phys_addr);
+						else
+							RKVM_DEBUG_PRINT(vcpu, "Recorded MMIOR to address: 0x%llx\n",
+									 (long long)vcpu->run->mmio.phys_addr);
+					} else {
+						RKVM_DEBUG_PRINT(vcpu, "Unrecorded MMIOR to address 0x%llx\n",
+								 (long long)vcpu->run->mmio.phys_addr);
+					}
 				}
 			}
 			break;
@@ -1566,26 +1699,38 @@ static void rkvm_replaying_on_vcpu_exit(rkvm_vcpu_host *vcpu, bool internal)
 						 vcpu->run->io.size, vcpu->run->io.port);
 			break;
 		case KVM_EXIT_MMIO:
-			RKVM_DEBUG_PRINT(vcpu, "Unplanned MMIO of len %d to address 0x%llx\n",
-					 vcpu->run->mmio.len,
-					 (long long)vcpu->run->mmio.phys_addr);
+			if (vcpu->run->mmio.is_write)
+				RKVM_DEBUG_PRINT(vcpu, "Unplanned MMIOW of len %d to address 0x%llx\n",
+						 vcpu->run->mmio.len,
+						 (long long)vcpu->run->mmio.phys_addr);
+			else
+				RKVM_DEBUG_PRINT(vcpu, "Unplanned MMIOR of len %d to address 0x%llx\n",
+						 vcpu->run->mmio.len,
+						 (long long)vcpu->run->mmio.phys_addr);
 			break;
 		}
 	} else {
-		switch (ops->userspace_exit_reason(vcpu)) {
-		case KVM_EXIT_IO:
-			if (vcpu->run->io.direction)
-				RKVM_DEBUG_PRINT(vcpu, "Masked OUT of size %d to port %d.\n",
-						 vcpu->run->io.size, vcpu->run->io.port);
-			else
-				RKVM_DEBUG_PRINT(vcpu, "Masked IN of size %d from port %d.\n",
-						 vcpu->run->io.size, vcpu->run->io.port);
-			break;
-		case KVM_EXIT_MMIO:
-			RKVM_DEBUG_PRINT(vcpu, "Masked MMIO of len %d to address 0x%llx\n",
-					 vcpu->run->mmio.len,
-					 (long long)vcpu->run->mmio.phys_addr);
-			break;
+		if (vcpu_replaying->has_internal_exit_reason) {
+			switch (ops->userspace_exit_reason(vcpu)) {
+			case KVM_EXIT_IO:
+				if (vcpu->run->io.direction)
+					RKVM_DEBUG_PRINT(vcpu, "Masked OUT of size %d to port %d.\n",
+							 vcpu->run->io.size, vcpu->run->io.port);
+				else
+					RKVM_DEBUG_PRINT(vcpu, "Masked IN of size %d from port %d.\n",
+							 vcpu->run->io.size, vcpu->run->io.port);
+				break;
+			case KVM_EXIT_MMIO:
+				if (vcpu->run->mmio.is_write)
+					RKVM_DEBUG_PRINT(vcpu, "Masked MMIOW of len %d to address 0x%llx\n",
+							 vcpu->run->mmio.len,
+							 (long long)vcpu->run->mmio.phys_addr);
+				else
+					RKVM_DEBUG_PRINT(vcpu, "Masked MMIOR of len %d to address 0x%llx\n",
+							 vcpu->run->mmio.len,
+							 (long long)vcpu->run->mmio.phys_addr);
+				break;
+			}
 		}
 	}
 	
@@ -1608,14 +1753,13 @@ static void rkvm_replaying_on_vcpu_exit(rkvm_vcpu_host *vcpu, bool internal)
 				if (is_synchronous_exit_reason(original_reason))
 					break;
 			}
-			if (rbc_to_target > 0)
-				RKVM_DEBUG_PRINT(vcpu, "Skipped %lld branches\n", (long long)rbc_to_target);
-			else if (rbc_to_target < 0)
-				RKVM_DEBUG_PRINT(vcpu, "Missing %lld branches\n", (long long)-rbc_to_target);
-			if (ecx_to_target)
-				RKVM_DEBUG_PRINT(vcpu, "Missed ecx by %d\n", ecx_to_target);
 			vcpu_data->accumulate_rbc = vcpu_replaying->replay_target_point.rbc;
 			vcpu_replaying->accumulate_rbc_delta += rbc_to_target;
+			if (rbc_to_target != 0)
+                            RKVM_DEBUG_PRINT(vcpu, "Sync-Fixed rbc by %lld (d=%lld)\n",
+					     (long long)rbc_to_target, (long long)vcpu_replaying->accumulate_rbc_delta);
+			if (ecx_to_target)
+                            RKVM_DEBUG_PRINT(vcpu, "Sync-Fixed ecx by %d\n", ecx_to_target);
 			unplanned = false;
 			fixed = true;
 		} else if (is_natural_exit_reason(exit_reason)) {
@@ -1633,10 +1777,11 @@ static void rkvm_replaying_on_vcpu_exit(rkvm_vcpu_host *vcpu, bool internal)
 			if (original_reason != exit_reason) {
 				if (is_natural_exit_reason(exit_reason)) {
 					if (is_synchronous_exit_reason(original_reason)) {
-						if (is_synchronous_exit_reason(exit_reason))
+						if (is_synchronous_exit_reason(exit_reason)) {
 							unplanned = true;
-						else
+						} else {
 							natural = true;
+						}
 						break;
 					} else if (is_synchronous_exit_reason(exit_reason)) {
 						/* TODO: What happens here? */
@@ -1651,17 +1796,22 @@ static void rkvm_replaying_on_vcpu_exit(rkvm_vcpu_host *vcpu, bool internal)
 		}
 		break;
 	}
+	good = !unplanned && !natural && !technical && !wrong;
+	if (good && (vcpu_replaying->replay_state == REPLAY_HIT_EVENT)) {
+		u64 rbc = vcpu_data->accumulate_rbc;
+		s64 rbc_to_target = vcpu_replaying->replay_target_point.rbc - rbc;
+		if (rbc_to_target != 0) {
+			vcpu_data->accumulate_rbc += rbc_to_target;
+			vcpu_replaying->accumulate_rbc_delta += rbc_to_target;
+			RKVM_DEBUG_PRINT(vcpu, "Pre-Fixed rbc by %lld (d=%lld)\n",
+					 (long long)rbc_to_target, (long long)vcpu_replaying->accumulate_rbc_delta);
+		}
+	}
 	RKVM_DEBUG_PRINT(vcpu, "%s vcpu_exit (reason %d)%s\n",
 			 unplanned ? "Unplanned" : fixed ? "Fixed" : natural ? "Natural" : technical ? "Technical" : "Planned",
 			 exit_reason,
 			 wrong ? " instead of irq" : "");
-	if (unplanned)
-		return;
-	if (natural)
-		return;
-	if (technical)
-		return;
-	if (wrong)
+	if (!good)
 		return;
 
 	replaying->replayed_rid = vcpu_replaying->replayed_rid = vcpu_replaying->next_rid;
@@ -1713,6 +1863,7 @@ static void rkvm_replaying_on_set_regs(rkvm_vcpu_host *vcpu, void *src, unsigned
 {
 	if (is_replay_disabled(vcpu))
 		return;
+	RKVM_DEBUG_PRINT(vcpu, "set_regs\n");
 	RKVM_READ_CHECK_REPLAY_DATA(vcpu, "regs", RKVM_REGS_STREAM, src, size);
 }
 
@@ -1762,8 +1913,9 @@ static bool rkvm_replaying_handle_halt(rkvm_vcpu_host *vcpu)
 {
 	if (is_replay_disabled(vcpu))
 		return false;
-	/* Halt is noop during replay. */
+	/* Halt should be noop during replay. */
 	//return true;
+	RKVM_DEBUG_PRINT(vcpu, "HALT\n");
 	return false;
 }
 
@@ -1789,6 +1941,11 @@ static void rkvm_replaying_update(rkvm_vcpu_host *vcpu, const char *debug_info, 
 
 	s64 pc_to_target = vcpu_replaying->replay_target_point.pc - pc;
 	s32 ecx_to_target = ecx - vcpu_replaying->replay_target_point.ecx;
+        s64 target_rbc_low =
+            (vcpu_replaying->accumulate_rbc_delta < 0) ?
+            - vcpu_replaying->accumulate_rbc_delta :
+            0;
+        s64 current_rbc_threshold = rbc_threshold + target_rbc_low;
 
 	if (is_replay_disabled(vcpu))
 		return;
@@ -1804,20 +1961,23 @@ static void rkvm_replaying_update(rkvm_vcpu_host *vcpu, const char *debug_info, 
 				 (long long)pc,
 				 ecx,
 				 (long long)vcpu_replaying->replay_read_counter);
-		if (rbc_to_target > rbc_threshold) {
+		if (rbc_to_target > current_rbc_threshold) {
 			vcpu_replaying->replay_state = REPLAY_WAIT_FOR_PMI;
-		} else /* rbc_to_target <= rbc_threshold */ {
+		} else /* rbc_to_target <= current_rbc_threshold */ {
 			if (pc_to_target == 0) {
 				if (ecx_to_target == 0) {
 					if (rbc_to_target == 0) {
 						rkvm_replaying_event_hit(vcpu);
-					} else if (rbc_to_target > 0) {
-						/* There is up to rbc_threshold branches left. What to do? */
+					} else if (rbc_to_target > target_rbc_low) {
+						/* There is up to current_rbc_threshold branches left. What to do? */
 						vcpu_replaying->replay_state = REPLAY_SINGLE_STEP;
-					} else /* (rbc_to_target < 0) */ {
-						RKVM_DEBUG_PRINT(vcpu, "Fixed rbc by %lld\n", (long long)-rbc_to_target);
+					} else /* (rbc_to_target <= target_rbc_low) */ {
+#if 0
 						vcpu_data->accumulate_rbc += rbc_to_target;
 						vcpu_replaying->accumulate_rbc_delta += rbc_to_target;
+						RKVM_DEBUG_PRINT(vcpu, "Fixed rbc by %lld (d=%lld)\n",
+								 (long long)rbc_to_target, (long long)vcpu_replaying->accumulate_rbc_delta);
+#endif
 						rkvm_replaying_event_hit(vcpu);
 					}
 				} else if (ecx_to_target > 0) {
@@ -1826,14 +1986,17 @@ static void rkvm_replaying_update(rkvm_vcpu_host *vcpu, const char *debug_info, 
 					if (rbc_to_target == 0) {
 						//RKVM_DEBUG_PRINT(vcpu, "Fixed ecx by %d\n", -ecx_to_target);
 						rkvm_replaying_event_hit(vcpu);
-					} else if (rbc_to_target > 0) {
-						/* There is up to rbc_threshold branches left. What to do? */
+					} else if (rbc_to_target > target_rbc_low) {
+						/* There is up to current_rbc_threshold branches left. What to do? */
 						vcpu_replaying->replay_state = REPLAY_SINGLE_STEP;
-					} else /* (rbc_to_target < 0) */ {
+					} else /* (rbc_to_target <= target_rbc_low) */ {
 						//RKVM_DEBUG_PRINT(vcpu, "Fixed ecx by %d\n", -ecx_to_target);
-						RKVM_DEBUG_PRINT(vcpu, "Fixed rbc by %lld\n", (long long)-rbc_to_target);
+#if 0
 						vcpu_data->accumulate_rbc += rbc_to_target;
 						vcpu_replaying->accumulate_rbc_delta += rbc_to_target;
+						RKVM_DEBUG_PRINT(vcpu, "Fixed rbc by %lld (d=%lld)\n",
+								 (long long)rbc_to_target, (long long)vcpu_replaying->accumulate_rbc_delta);
+#endif
 						rkvm_replaying_event_hit(vcpu);
 					}
 				}
@@ -1954,7 +2117,10 @@ EXPORT_SYMBOL_GPL(rkvm_destroy);
 bool rkvm_must_exit(rkvm_vcpu_host *vcpu)
 {
 	struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
-	return vcpu_data->must_exit;
+	bool result = vcpu_data->must_exit && !vcpu_data->make_one_more_step;
+	if (result)
+		RKVM_DEBUG_PRINT(vcpu, "rkvm_must_exit\n");
+	return result;
 }
 EXPORT_SYMBOL_GPL(rkvm_must_exit);
 
@@ -2006,20 +2172,22 @@ int rkvm_set_timer_quantum(rkvm_host *host, u32 preemption_timer_quantum)
 }
 EXPORT_SYMBOL_GPL(rkvm_set_timer_quantum);
 
-int rkvm_on_preemption_timer_exit(rkvm_vcpu_host *vcpu)
+int rkvm_on_preemption_timer_exit(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops)
 {
 	int ret = 0;
 
 	bool preempt, record, replay, lock_step;
 	EXTRACT_VCPU_MODE(vcpu);
 
-#if 0
+#if 1
 	if (record) {
-		struct rkvm_vcpu_recording *vcpu_recording = RKVM_VCPU_RECORDING(vcpu);
-		RKVM_DEBUG_PRINT(vcpu, "Will make one more step.\n");
-		vcpu_recording->make_one_more_step = true;
-		rkvm_preemption_run_free(vcpu, true);
-		ret = 1;
+		if (lops->mov_ss_blocks_interrupts()) {
+			struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
+			struct rkvm_vcpu_recording *vcpu_recording = RKVM_VCPU_RECORDING(vcpu);
+			RKVM_DEBUG_PRINT(vcpu, "Will make one more step.\n");
+			vcpu_data->make_one_more_step = true;
+			ret = 1;
+		}
 	}
 #endif
 	return ret;
@@ -2436,3 +2604,9 @@ long rkvm_vcpu_ioctl(rkvm_vcpu_host *vcpu,
 	return -ENOTTY;
 }
 EXPORT_SYMBOL_GPL(rkvm_vcpu_ioctl);
+
+void rkvm_debug_output(rkvm_vcpu_host *vcpu, const char *s)
+{
+	RKVM_DEBUG_PRINT(vcpu, "%s\n", s);
+}
+EXPORT_SYMBOL_GPL(rkvm_debug_output);

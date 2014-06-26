@@ -65,6 +65,7 @@ struct rkvm_vcpu_data {
 	bool must_exit;
 	bool process_exit;
 	bool exit_immediately;
+	bool make_one_more_step;
 	bool launched;
 
 	struct rkvm_vcpu_recording {
@@ -79,7 +80,6 @@ struct rkvm_vcpu_data {
 		u64 recorded_rid;
 		u64 recorded_tsc;
 		bool vcpu_halted;
-		bool make_one_more_step;
 		bool has_internal_exit_reason;
 	} recording;
 
@@ -100,18 +100,24 @@ struct rkvm_vcpu_data {
 		bool vcpu_halted;
 		bool has_internal_exit_reason;
 		s64 accumulate_rbc_delta;
+		bool has_breakpoint;
+		u64 old_bp_value;
 	} replaying;
 
 	u64 vmentry_guest_pc;
+	u64 vmexit_guest_pc;
+
 	u32 vmentry_guest_ecx;
+	u32 vmexit_guest_ecx;
 
 	u64 accumulate_rbc;
-	u64 vmexit_guest_pc;
-	u32 vmexit_guest_ecx;
+	bool single_stepping;
+
 	int in_counter;
 	int out_counter;
 
 	u64 entry_rbc;
+	u64 exit_rbc;
 
 	atomic_t irq_counts[KVM_NR_INTERRUPTS];
 
