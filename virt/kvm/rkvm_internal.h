@@ -42,7 +42,6 @@ enum rkvm_sync_reason {
 enum rkvm_replay_state {
 	REPLAY_UNINITIALIZED,
 	REPLAY_WAIT_FOR_PMI,
-	REPLAY_SINGLE_STEP,
 	REPLAY_HIT_EVENT,
 	REPLAY_NEW_TARGET,
 };
@@ -142,6 +141,7 @@ struct rkvm_data {
 	} replaying;
 
 	rkvm_vcpu_host *dma_vcpu;
+	spinlock_t dma_vcpu_spinlock;
 };
 
 #endif /* __RKVM_INTERNAL_H */

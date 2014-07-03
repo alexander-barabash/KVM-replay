@@ -6083,9 +6083,7 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 	while (r > 0) {
 		if (vcpu->arch.mp_state == KVM_MP_STATE_RUNNABLE &&
 		    !vcpu->arch.apf.halted) {
-			//do {
-				r = vcpu_enter_guest(vcpu);
-				//} while ((r > 0) && !rkvm_can_reschedule(vcpu));
+			r = vcpu_enter_guest(vcpu);
 		} else {
 			rkvm_vcpu_halted(vcpu);
 			rkvm_on_vcpu_exit(vcpu, true);

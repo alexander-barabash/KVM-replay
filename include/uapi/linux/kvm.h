@@ -1025,16 +1025,17 @@ struct kvm_s390_ucas_mapping {
 
 /* Available with KVM_CAP_PREEMPTION_TIMER */
 #define RKVM_SET_TIMER_QUANTUM	        _IOW(KVMIO, 0xc0, __u32)
-#define RKVM_GET_TIMER_QUANTUM	        _IOW(KVMIO, 0xc1, __u32)
+#define RKVM_GET_TIMER_QUANTUM	        _IOR(KVMIO, 0xc1, __u32)
 #define RKVM_SET_EXECUTION_FLAG		_IOW(KVMIO, 0xc2, __u32)
 #define RKVM_CLEAR_EXECUTION_FLAG	_IOW(KVMIO, 0xc3, __u32)
-#define RKVM_GET_EXECUTION_MODE		_IOW(KVMIO, 0xc4, __u32)
+#define RKVM_GET_EXECUTION_MODE		_IOR(KVMIO, 0xc4, __u32)
 #define RKVM_USERSPACE_ENTRY	        _IOW(KVMIO, 0xc5, struct rkvm_userspace_data)
 #define RKVM_USERSPACE_EXIT	        _IOW(KVMIO, 0xc6, struct rkvm_userspace_data)
-#define RKVM_OPEN_RECORD_STREAMS	_IOW(KVMIO, 0xca, struct rkvm_stream_fds)
-#define RKVM_OPEN_REPLAY_STREAMS	_IOW(KVMIO, 0xcb, struct rkvm_stream_fds)
+#define RKVM_OPEN_RECORD_STREAMS	_IOR(KVMIO, 0xca, struct rkvm_stream_fds)
+#define RKVM_OPEN_REPLAY_STREAMS	_IOR(KVMIO, 0xcb, struct rkvm_stream_fds)
 #define RKVM_OPEN_DEBUG_STREAM	         _IO(KVMIO, 0xcc)
 #define RKVM_XFER	                _IOW(KVMIO, 0xcd, struct rkvm_xfer)
+#define RKVM_FLUSH_COALESCED            _IOW(KVMIO, 0xce, __u32)
 
 
 #define KVM_DEV_ASSIGN_ENABLE_IOMMU	(1 << 0)

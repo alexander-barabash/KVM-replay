@@ -825,7 +825,7 @@ static inline int emulate_instruction(struct kvm_vcpu *vcpu,
 {
 	int r = x86_emulate_instruction(vcpu, 0, emulation_type, NULL, 0);
 	if (r == EMULATE_DONE) {
-		rkvm_debug_output(vcpu, "emulate_instruction\n");
+		rkvm_debug_output(vcpu, "emulate_instruction");
 	}
 	return r;
 }

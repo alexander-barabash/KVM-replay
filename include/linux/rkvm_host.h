@@ -94,6 +94,8 @@ extern bool rkvm_before_inject_rmod_irq(rkvm_vcpu_host *vcpu, int irq);
 extern bool rkvm_after_inject_irq(rkvm_vcpu_host *vcpu, int irq);
 extern bool rkvm_after_inject_nmi(rkvm_vcpu_host *vcpu, int irq);
 
+extern bool rkvm_handle_nmi(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops);
+
 extern bool rkvm_on_pio_in_data_avail(rkvm_vcpu_host *vcpu,
 				      void *target, const void *src, int size);
 

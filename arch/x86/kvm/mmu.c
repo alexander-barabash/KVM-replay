@@ -4182,7 +4182,7 @@ int kvm_mmu_page_fault(struct kvm_vcpu *vcpu, gva_t cr2, u32 error_code,
 
 	switch (er) {
 	case EMULATE_DONE:
-		rkvm_debug_output(vcpu, "emulate_instruction\n");
+		rkvm_debug_output(vcpu, "emulate_instruction");
 		return 1;
 	case EMULATE_USER_EXIT:
 		++vcpu->stat.mmio_exits;

@@ -5646,7 +5646,7 @@ static int handle_ept_misconfig(struct kvm_vcpu *vcpu)
 		r = (x86_emulate_instruction(vcpu, gpa, 0, NULL, 0) ==
 		     EMULATE_DONE);
 		if (r)
-			rkvm_debug_output(vcpu, "emulate_instruction\n");
+			rkvm_debug_output(vcpu, "emulate_instruction");
 		return r;
 	}
 
@@ -7140,10 +7140,11 @@ static void vmx_complete_atomic_exit(struct vcpu_vmx *vmx)
 	/* We need to handle NMIs before interrupts are enabled */
 	if ((exit_intr_info & INTR_INFO_INTR_TYPE_MASK) == INTR_TYPE_NMI_INTR &&
 	    (exit_intr_info & INTR_INFO_VALID_MASK)) {
-		rkvm_debug_output(&vmx->vcpu, "Handling NMI");
-		kvm_before_handle_nmi(&vmx->vcpu);
-		asm("int $2");
-		kvm_after_handle_nmi(&vmx->vcpu);
+		if (!rkvm_handle_nmi(&vmx->vcpu, &rkvm_local_ops)) {
+			kvm_before_handle_nmi(&vmx->vcpu);
+			asm("int $2");
+			kvm_after_handle_nmi(&vmx->vcpu);
+		}
 	}
 }
 
@@ -7636,7 +7637,7 @@ static void prepare_guest_kept_msrs(struct vcpu_vmx *vmx)
 	u64 perf_ctrl_enable = one << 22;
 	u64 perf_ctrl_apic_intr_enable = one << 20;
 	u64 perf_ctrl_branch_retired_event_select = 0xc4; // RBC: 0xc4; RIC: 0xc0
-	u64 perf_ctrl_branch_retired_umask = 1 << 8; /* Only conditional branches: 1 << 8; */ /* All branches: 0 << 8; */
+	u64 perf_ctrl_branch_retired_umask = 0 << 8; /* Only conditional branches: 1 << 8; */ /* All branches: 0 << 8; */
 
 	bool recording = rkvm_recording(vmx->vcpu.kvm);
 	bool replaying = rkvm_replaying(vmx->vcpu.kvm);
@@ -7828,12 +7829,21 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	rkvm_on_vmentry(vcpu, &rkvm_local_ops);
 	{
 		char dbbuf[100];
-		sprintf(dbbuf, "VM_ENTRY_INTR_INFO_FIELD=0x%x",
-			vmcs_read32(VM_ENTRY_INTR_INFO_FIELD));
-		rkvm_debug_output(vcpu, dbbuf);
-		sprintf(dbbuf, "GUEST_INTERRUPTIBILITY_INFO=0x%x",
-			vmcs_read32(GUEST_INTERRUPTIBILITY_INFO));
-		rkvm_debug_output(vcpu, dbbuf);
+		u32 info;
+		info = vmcs_read32(VM_ENTRY_INTR_INFO_FIELD);
+		if ((info & INTR_INFO_VALID_MASK) == INTR_INFO_VALID_MASK) {
+			sprintf(dbbuf, "VM_ENTRY_INTR_INFO_FIELD=0x%x", info);
+			rkvm_debug_output(vcpu, dbbuf);
+		}
+		info = vmcs_read32(GUEST_INTERRUPTIBILITY_INFO);
+		if (info) {
+			sprintf(dbbuf, "GUEST_INTERRUPTIBILITY_INFO=0x%x", info);
+			rkvm_debug_output(vcpu, dbbuf);
+		}
+		info = vmcs_read32(CPU_BASED_VM_EXEC_CONTROL);
+		if ((info & CPU_BASED_VIRTUAL_INTR_PENDING) != 0) {
+			rkvm_debug_output(vcpu, "Virtual interrupt pending");
+		}
 	}
 
 	atomic_switch_perf_msrs(vmx);
@@ -7994,12 +8004,26 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 		       &rkvm_local_ops);
 	{
 		char dbbuf[100];
-		sprintf(dbbuf, "VM_EXIT_INTR_INFO=0x%x",
-			vmcs_read32(VM_EXIT_INTR_INFO));
-		rkvm_debug_output(vcpu, dbbuf);
-		sprintf(dbbuf, "GUEST_INTERRUPTIBILITY_INFO=0x%x",
-			vmcs_read32(GUEST_INTERRUPTIBILITY_INFO));
-		rkvm_debug_output(vcpu, dbbuf);
+		u32 info;
+		info = vmcs_read32(VM_EXIT_INTR_INFO);
+		if ((info & INTR_INFO_VALID_MASK) == INTR_INFO_VALID_MASK) {
+			sprintf(dbbuf, "VM_EXIT_INTR_INFO=0x%x", info);
+			rkvm_debug_output(vcpu, dbbuf);
+		}
+		info = vmcs_read32(GUEST_INTERRUPTIBILITY_INFO);
+		if (info) {
+			sprintf(dbbuf, "GUEST_INTERRUPTIBILITY_INFO=0x%x", info);
+			rkvm_debug_output(vcpu, dbbuf);
+		}
+		info = vmcs_read32(CPU_BASED_VM_EXEC_CONTROL);
+		if ((info & CPU_BASED_VIRTUAL_INTR_PENDING) != 0) {
+			rkvm_debug_output(vcpu, "Virtual interrupt pending");
+		}
+		info = vmcs_read32(IDT_VECTORING_INFO_FIELD);
+		if ((info & INTR_INFO_VALID_MASK) == INTR_INFO_VALID_MASK) {
+			sprintf(dbbuf, "IDT_VECTORING_INFO_FIELD=0x%x", info);
+			rkvm_debug_output(vcpu, dbbuf);
+		}
 	}
 
  	vmx_complete_atomic_exit(vmx);
