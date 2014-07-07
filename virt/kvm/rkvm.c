@@ -865,6 +865,12 @@ bool rkvm_recording_or_replaying(rkvm_host *host)
 }
 EXPORT_SYMBOL_GPL(rkvm_recording_or_replaying);
 
+bool rkvm_vcpu_recording_or_replaying(rkvm_vcpu_host *vcpu)
+{
+	return rkvm_recording_or_replaying(RKVM_HOST(vcpu));
+}
+EXPORT_SYMBOL_GPL(rkvm_vcpu_recording_or_replaying);
+
 bool rkvm_guest_reg_available(rkvm_host *host, u32 reg)
 {
 	struct rkvm_data *rkvm_data = RKVM_DATA(host);

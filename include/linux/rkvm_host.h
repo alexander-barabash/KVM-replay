@@ -72,6 +72,7 @@ extern bool rkvm_preempting(rkvm_host *host);
 extern bool rkvm_recording(rkvm_host *host);
 extern bool rkvm_replaying(rkvm_host *host);
 extern bool rkvm_recording_or_replaying(rkvm_host *host);
+extern bool rkvm_vcpu_recording_or_replaying(rkvm_vcpu_host *vcpu);
 
 extern int rkvm_init(rkvm_host *host,
 		     struct rkvm_ops *ops);

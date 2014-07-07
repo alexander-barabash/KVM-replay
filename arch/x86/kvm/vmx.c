@@ -4373,7 +4373,7 @@ static u32 vmx_exec_control(struct vcpu_vmx *vmx)
 static u32 vmx_secondary_exec_control(struct vcpu_vmx *vmx)
 {
 	u32 exec_control = vmcs_config.cpu_based_2nd_exec_ctrl;
-	if (rkvm_recording_or_replaying(vmx->vcpu.kvm))
+	if (rkvm_vcpu_recording_or_replaying(&vmx->vcpu))
 		exec_control |=
 			(vmcs_config.opt_cpu_based_2nd_exec_ctrl & SECONDARY_EXEC_RDTSCP);
 	if (!vm_need_virtualize_apic_accesses(vmx->vcpu.kvm))
@@ -4991,17 +4991,19 @@ static int handle_exception(struct kvm_vcpu *vcpu)
 	switch (ex_no) {
 	case DB_VECTOR:
 		dr6 = vmcs_readl(EXIT_QUALIFICATION);
-		{
+		if (rkvm_vcpu_recording_or_replaying(vcpu)) {
 			char buffer[32];
 			sprintf(buffer, "DB_VECTOR dr6=0x%lx", dr6);
 			rkvm_debug_output(vcpu, buffer);
 		}
-return 1;
+		if (rkvm_replaying(vcpu->kvm))
+			return 1;
 		if (!(vcpu->guest_debug &
 		      (KVM_GUESTDBG_SINGLESTEP | KVM_GUESTDBG_USE_HW_BP))) {
 			vcpu->arch.dr6 = dr6 | DR6_FIXED_1;
 			kvm_queue_exception(vcpu, DB_VECTOR);
-			rkvm_debug_output(vcpu, "kvm_queue_exception DB_VECTOR");
+			if (rkvm_vcpu_recording_or_replaying(vcpu))
+				rkvm_debug_output(vcpu, "kvm_queue_exception DB_VECTOR");
 			return 1;
 		}
 		kvm_run->debug.arch.dr6 = dr6 | DR6_FIXED_1;
@@ -5645,8 +5647,10 @@ static int handle_ept_misconfig(struct kvm_vcpu *vcpu)
 		int r;
 		r = (x86_emulate_instruction(vcpu, gpa, 0, NULL, 0) ==
 		     EMULATE_DONE);
-		if (r)
-			rkvm_debug_output(vcpu, "emulate_instruction");
+		if (r) {
+			if (rkvm_replaying(vcpu->kvm))
+				rkvm_debug_output(vcpu, "emulate_instruction");
+		}
 		return r;
 	}
 
@@ -7827,7 +7831,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 		vmx_set_interrupt_shadow(vcpu, 0);
 
 	rkvm_on_vmentry(vcpu, &rkvm_local_ops);
-	{
+	if (rkvm_replaying(vcpu->kvm)) {
 		char dbbuf[100];
 		u32 info;
 		info = vmcs_read32(VM_ENTRY_INTR_INFO_FIELD);
@@ -7850,7 +7854,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 	prepare_guest_kept_msrs(vmx);
 	debugctlmsr = get_debugctlmsr();
 #if 1
-	if (rkvm_recording_or_replaying(vcpu->kvm)) {
+	if (rkvm_vcpu_recording_or_replaying(vcpu)) {
 		vmcs_write64(GUEST_IA32_DEBUGCTL,
 			     vmcs_read64(GUEST_IA32_DEBUGCTL) |
 			     DEBUGCTLMSR_FREEZE_WHILE_SMM_EN);
@@ -8002,7 +8006,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
 		       is_nmi_interrupt(vmx->idt_vectoring_info),
 		       vmx->exit_reason,
 		       &rkvm_local_ops);
-	{
+	if (rkvm_replaying(vcpu->kvm)) {
 		char dbbuf[100];
 		u32 info;
 		info = vmcs_read32(VM_EXIT_INTR_INFO);
