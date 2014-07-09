@@ -13,7 +13,7 @@ extern void rkvm_preemption_destroy(rkvm_host *host);
 extern int rkvm_vcpu_preemption_init(rkvm_vcpu_host *vcpu);
 extern void rkvm_vcpu_preemption_destroy(rkvm_vcpu_host *host);
 
-extern int rkvm_preemption_set_timer_quantum(rkvm_host *host, u32 preemption_timer_quantum);
+extern int rkvm_preemption_set_quantum(rkvm_host *host, u64 quantum);
 
 extern void rkvm_preemption_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops);
 extern void rkvm_preemption_on_vmexit(rkvm_vcpu_host *vcpu, struct rkvm_userspace_data *userspace,
@@ -45,9 +45,6 @@ extern void rkvm_preemption_update_debug_data(rkvm_vcpu_host *vcpu);
 extern void rkvm_preemption_run_free(rkvm_vcpu_host *vcpu, bool on, struct rkvm_local_ops *lops);
 
 
-extern bool kvm_has_preemption_timer;
-extern int kvm_preemption_timer_rate;
-
 struct rkvm_preemption {
 	struct rkvm_ops *ops;
 	spinlock_t spinlock;
@@ -55,13 +52,13 @@ struct rkvm_preemption {
 	u64 back;
 	u64 steal;
 	u64 tsc_when_stopped;
-	u32 quantum;
+	u64 quantum;
 	bool all_stopped;
 };
 
 struct rkvm_vcpu_preemption {
-	u64 accumulate_preemption_timer;
-	u32 entry_preemption_timer;
+	u64 accumulate_ucc;
+	s64 entry_ucc;
 	bool vcpu_launched;
 	bool vcpu_halted;
 	bool step_locked;

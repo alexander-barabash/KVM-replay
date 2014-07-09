@@ -275,7 +275,6 @@ static inline struct bstream *get_replay_bstream(rkvm_vcpu_host *vcpu, enum rkvm
 static inline bool is_natural_exit_reason(u32 reason)
 {
 	switch (reason) {
-	case KVM_EXIT_PREEMPTION_TIMER:
 	case KVM_EXIT_RKVM:
 		return false;
 	default:
@@ -286,7 +285,6 @@ static inline bool is_natural_exit_reason(u32 reason)
 static inline bool is_synchronous_exit_reason(u32 reason)
 {
 	switch (reason) {
-	case KVM_EXIT_PREEMPTION_TIMER:
 	case KVM_EXIT_RKVM:
 	case KVM_EXIT_INTR:
 	case KVM_EXIT_IRQ_WINDOW_OPEN:
@@ -558,12 +556,22 @@ static int do_rkvm_xfer(rkvm_host *host, struct rkvm_xfer *rkvm_xfer, bool recor
 bool rkvm_handle_nmi(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops)
 {
 	bool handled = false;
+	struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
 	bool preempt, record, replay, lock_step;
 	EXTRACT_VCPU_MODE(vcpu);
 
+	if (preempt) {
+		if (lops->has_ucc_pmi()) {
+			RKVM_DEBUG_PRINT(vcpu, "Handled UCC PMI\n");
+			lops->clear_ucc_pmi();
+			handled = true;
+			vcpu_data->must_exit = true;
+		}
+	}
+
 	if (replay) {
 		if (lops->has_rbc_pmi()) {
-			RKVM_DEBUG_PRINT(vcpu, "Handled PMI\n");
+			RKVM_DEBUG_PRINT(vcpu, "Handled RBC PMI\n");
 			lops->clear_rbc_pmi();
 			handled = true;
 		}
@@ -820,18 +828,6 @@ void rkvm_on_set_dregs(rkvm_vcpu_host *vcpu, void *src, unsigned size)
 		rkvm_replaying_on_set_dregs(vcpu, src, size);
 }
 EXPORT_SYMBOL_GPL(rkvm_on_set_dregs);
-
-bool kvm_enable_preemption_timer(rkvm_vcpu_host *vcpu)
-{
-	if (kvm_has_preemption_timer) {
-		bool preempt, record, replay, lock_step;
-		EXTRACT_VCPU_MODE(vcpu);
-		return preempt;
-	} else {
-		return false;
-	}
-}
-EXPORT_SYMBOL_GPL(kvm_enable_preemption_timer);
 
 bool rkvm_preempting(rkvm_host *host)
 {
@@ -1130,19 +1126,6 @@ bool rkvm_handle_halt(rkvm_vcpu_host *vcpu)
 	return handled;
 }
 EXPORT_SYMBOL_GPL(rkvm_handle_halt);
-
-void rkvm_handle_external_interrupt(rkvm_vcpu_host *vcpu)
-{
-	bool preempt, record, replay, lock_step;
-	EXTRACT_VCPU_MODE(vcpu);
-#if 0
-	if (record) {
-		struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
-		vcpu_data->make_one_more_step = true;
-	}
-#endif
-}
-EXPORT_SYMBOL_GPL(rkvm_handle_external_interrupt);
 
 void rkvm_vcpu_halted(rkvm_vcpu_host *vcpu)
 {
@@ -2241,24 +2224,26 @@ void rkvm_userspace_exit(rkvm_host *host,
 }
 EXPORT_SYMBOL_GPL(rkvm_userspace_exit);
 
-int rkvm_set_timer_quantum(rkvm_host *host, u32 preemption_timer_quantum)
+int rkvm_set_quantum(rkvm_host *host, u64 quantum)
 {
 	int ret;
 
 	bool preempt, record, replay, lock_step;
 	EXTRACT_MODE(host);
 
-	ret = rkvm_preemption_set_timer_quantum(host, preemption_timer_quantum);
+	ret = rkvm_preemption_set_quantum(host, quantum);
 	if (ret < 0)
 		return ret;
 
-	preempt = (rkvm_get_timer_quantum(host) > 0);
+	preempt = (rkvm_get_quantum(host) > 0);
 	UPDATE_MODE(host);
 
 	return ret;
 }
-EXPORT_SYMBOL_GPL(rkvm_set_timer_quantum);
+EXPORT_SYMBOL_GPL(rkvm_set_quantum);
 
+#if 0
+extern int rkvm_on_preemption_timer_exit(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops);
 int rkvm_on_preemption_timer_exit(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops)
 {
 	int ret = 0;
@@ -2266,7 +2251,6 @@ int rkvm_on_preemption_timer_exit(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *l
 	bool preempt, record, replay, lock_step;
 	EXTRACT_VCPU_MODE(vcpu);
 
-#if 1
 	if (record) {
 		if (lops->mov_ss_blocks_interrupts()) {
 			struct rkvm_vcpu_data *vcpu_data = RKVM_VCPU_DATA(vcpu);
@@ -2275,10 +2259,11 @@ int rkvm_on_preemption_timer_exit(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *l
 			ret = 1;
 		}
 	}
-#endif
+
 	return ret;
 }
 EXPORT_SYMBOL_GPL(rkvm_on_preemption_timer_exit);
+#endif
 
 static inline bool rkvm_execution_mode_valid(rkvm_host *host, u32 execution_mode)
 {
@@ -2501,7 +2486,7 @@ bool rkvm_replay_tsc(rkvm_vcpu_host *vcpu, u64 *out_tsc_value)
 }
 EXPORT_SYMBOL_GPL(rkvm_replay_tsc);
 
-bool rkvm_retrieve_preemption_tsc(rkvm_vcpu_host *vcpu, u64 *out_tsc_value)
+bool rkvm_retrieve_tsc(rkvm_vcpu_host *vcpu, u64 *out_tsc_value)
 {
 	bool preempt, record, replay, lock_step;
 	EXTRACT_VCPU_MODE(vcpu);
@@ -2514,7 +2499,7 @@ bool rkvm_retrieve_preemption_tsc(rkvm_vcpu_host *vcpu, u64 *out_tsc_value)
 
 	return false;
 }
-EXPORT_SYMBOL_GPL(rkvm_retrieve_preemption_tsc);
+EXPORT_SYMBOL_GPL(rkvm_retrieve_tsc);
 
 void rkvm_record_irq(rkvm_vcpu_host *vcpu, u32 irq)
 {
@@ -2531,20 +2516,20 @@ long rkvm_arch_vm_ioctl(struct kvm *kvm,
 	default:
 		*phandled = false;
 		return r;
-	case RKVM_SET_TIMER_QUANTUM: {
-		u32 preemption_timer_quantum;
+	case RKVM_SET_QUANTUM: {
+		u64 quantum;
 		
 		r = -EFAULT;
-		if (copy_from_user(&preemption_timer_quantum, argp, sizeof preemption_timer_quantum))
+		if (copy_from_user(&quantum, argp, sizeof quantum))
 			goto out;
-		r = rkvm_set_timer_quantum(kvm, preemption_timer_quantum);
+		r = rkvm_set_quantum(kvm, quantum);
 		break;
 	}
-	case RKVM_GET_TIMER_QUANTUM: {
-		u32 preemption_timer_quantum = rkvm_get_timer_quantum(kvm);
+	case RKVM_GET_QUANTUM: {
+		u64 quantum = rkvm_get_quantum(kvm);
 
 		r = -EFAULT;
-		if (copy_to_user(argp, &preemption_timer_quantum, sizeof preemption_timer_quantum))
+		if (copy_to_user(argp, &quantum, sizeof quantum))
 			goto out;
 		r = 0;
 	}

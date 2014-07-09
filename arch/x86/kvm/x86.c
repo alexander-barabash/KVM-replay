@@ -2622,11 +2622,8 @@ int kvm_dev_ioctl_check_extension(long ext)
 	case KVM_CAP_TSC_DEADLINE_TIMER:
 		r = boot_cpu_has(X86_FEATURE_TSC_DEADLINE_TIMER);
 		break;
-	case KVM_CAP_PREEMPTION_TIMER:
-		r = kvm_has_preemption_timer;
-		break;
-	case KVM_CAP_PREEMPTION_TIMER_RATE:
-		r = kvm_preemption_timer_rate;
+	case KVM_CAP_RKVM:
+		r = 1;
 		break;
 	default:
 		r = 0;

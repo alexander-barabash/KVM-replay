@@ -172,8 +172,7 @@ struct kvm_pit_config {
 #define KVM_EXIT_WATCHDOG         21
 #define KVM_EXIT_S390_TSCH        22
 #define KVM_EXIT_EPR              23
-#define KVM_EXIT_PREEMPTION_TIMER 24
-#define KVM_EXIT_RKVM	          25
+#define KVM_EXIT_RKVM	          24
 
 /* For KVM_EXIT_INTERNAL_ERROR */
 /* Emulate instruction failed. */
@@ -673,10 +672,7 @@ struct kvm_ppc_smmu_info {
 #define KVM_CAP_PPC_RTAS 91
 #define KVM_CAP_IRQ_XICS 92
 #define KVM_CAP_ARM_EL1_32BIT 93
-#ifdef __KVM_HAVE_PREEMPTION_TIMER
-#define KVM_CAP_PREEMPTION_TIMER 94
-#define KVM_CAP_PREEMPTION_TIMER_RATE 95
-#endif
+#define KVM_CAP_RKVM 94
 
 #ifdef KVM_CAP_IRQ_ROUTING
 
@@ -1023,9 +1019,9 @@ struct kvm_s390_ucas_mapping {
 #define KVM_ARM_VCPU_INIT	  _IOW(KVMIO,  0xae, struct kvm_vcpu_init)
 #define KVM_GET_REG_LIST	  _IOWR(KVMIO, 0xb0, struct kvm_reg_list)
 
-/* Available with KVM_CAP_PREEMPTION_TIMER */
-#define RKVM_SET_TIMER_QUANTUM	        _IOW(KVMIO, 0xc0, __u32)
-#define RKVM_GET_TIMER_QUANTUM	        _IOR(KVMIO, 0xc1, __u32)
+/* Available with KVM_CAP_RKVM */
+#define RKVM_SET_QUANTUM	        _IOW(KVMIO, 0xc0, __u64)
+#define RKVM_GET_QUANTUM	        _IOR(KVMIO, 0xc1, __u64)
 #define RKVM_SET_EXECUTION_FLAG		_IOW(KVMIO, 0xc2, __u32)
 #define RKVM_CLEAR_EXECUTION_FLAG	_IOW(KVMIO, 0xc3, __u32)
 #define RKVM_GET_EXECUTION_MODE		_IOR(KVMIO, 0xc4, __u32)

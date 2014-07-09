@@ -6,7 +6,7 @@
 struct rkvm_vcpu_debug_data {
 	__u64 cnt;
 
-	__u64 accumulate_preemption_timer;
+	__u64 accumulate_ucc;
 	__u64 reported_secs;
 	
 	__u32 userspace_running;
@@ -20,7 +20,7 @@ struct rkvm_vcpu_debug_data {
 };
 
 struct rkvm_userspace_data {
-	__u64 accumulate_preemption_timer;
+	__u64 accumulate_ucc;
 	__u64 back;
 	__u32 quantum;
 	__u32 running;

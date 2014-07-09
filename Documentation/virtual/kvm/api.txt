@@ -2381,30 +2381,30 @@ associated with the service will be forgotten, and subsequent RTAS
 calls by the guest for that service will be passed to userspace to be
 handled.
 
-4.86 RKVM_SET_TIMER_QUANTUM
+4.86 RKVM_SET_QUANTUM
 
-Capability: KVM_CAP_PREEMPTION_TIMER
+Capability: KVM_CAP_RKVM
 Architectures: x86
 Type: vm ioctl
-Parameters: __u32 preemption_quantum
+Parameters: __u64 quantum
 Returns: 0 on success, negative value on failure
 
-Defines the value of preemption timer quantum.
-When set to zero, no preemption timer quantum is used.
+Defines the value of quantum.
+When set to zero, no quantum is used.
 
-4.87 RKVM_GET_TIMER_QUANTUM
+4.87 RKVM_GET_QUANTUM
 
-Capability: KVM_CAP_PREEMPTION_TIMER
+Capability: KVM_CAP_RKVM
 Architectures: x86
 Type: vm ioctl
-Parameters: __u32 preemption_quantum (out)
+Parameters: __u64 quantum (out)
 Returns: 0 on success, negative value on failure
 
-Returns the value of preemption timer quantum.
+Returns the value of quantum.
 
 4.88 RKVM_SET_EXECUTION_FLAG
 
-Capability: KVM_CAP_PREEMPTION_TIMER
+Capability: KVM_CAP_RKVM
 Architectures: x86
 Type: vm ioctl
 Parameters: __u32 execution_mode
@@ -2419,7 +2419,7 @@ Bit flags for execution_mode:
 
 4.89 RKVM_CLEAR_EXECUTION_FLAG
 
-Capability: KVM_CAP_PREEMPTION_TIMER
+Capability: KVM_CAP_RKVM
 Architectures: x86
 Type: vm ioctl
 Parameters: __u32 execution_mode
@@ -2427,7 +2427,7 @@ Returns: 0 on success, negative value on failure
 
 4.90 RKVM_GET_EXECUTION_MODE
 
-Capability: KVM_CAP_PREEMPTION_TIMER
+Capability: KVM_CAP_RKVM
 Architectures: x86
 Type: vm ioctl
 Parameters: __u32 execution_mode (out)
@@ -2437,7 +2437,7 @@ Returns the value of KVM execution mode in the parameter.
 
 4.91 RKVM_USERSPACE_ENTRY
 
-Capability: KVM_CAP_PREEMPTION_TIMER
+Capability: KVM_CAP_RKVM
 Architectures: x86
 Type: vm ioctl
 Parameters: struct rkvm_userspace_data (out)
@@ -2445,7 +2445,7 @@ Returns: 0 on success, negative value on failure
 
 4.91 RKVM_USERSPACE_EXIT
 
-Capability: KVM_CAP_PREEMPTION_TIMER
+Capability: KVM_CAP_RKVM
 Architectures: x86
 Type: vm ioctl
 Parameters: struct rkvm_userspace_data (in)
@@ -2453,7 +2453,7 @@ Returns: 0 on success, negative value on failure
 
 4.92 RKVM_OPEN_RECORD_STREAMS
 
-Capability: KVM_CAP_PREEMPTION_TIMER
+Capability: KVM_CAP_RKVM
 Architectures: x86
 Type: vcpu ioctl
 Parameters: struct rkvm_stream_fds (out)
@@ -2469,7 +2469,7 @@ struct rkvm_stream_fds is defined as follows:
 
 4.93 RKVM_OPEN_REPLAY_STREAMS
 
-Capability: KVM_CAP_PREEMPTION_TIMER
+Capability: KVM_CAP_RKVM
 Architectures: x86
 Type: vcpu ioctl
 Parameters: struct rkvm_stream_fds (out)
