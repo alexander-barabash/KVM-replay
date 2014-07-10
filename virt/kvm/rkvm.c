@@ -602,12 +602,13 @@ void rkvm_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lops)
 	if (replay)
 		rkvm_replaying_on_vmentry(vcpu, lops);
 
-	if (record || replay || preempt)
+	if (record || replay || preempt) {
 		lops->ensure_rdtsc_exiting();
-		
+		lops->disable_host_pmc_counters();
+	}
+
 	if (record || replay) {
 		vcpu_data->entry_rbc = ops->read_rbc(vcpu);
-		lops->disable_host_pmc_counters();
 	}
 
 	if (vcpu_data->single_stepping) {
