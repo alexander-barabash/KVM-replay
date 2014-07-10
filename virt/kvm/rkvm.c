@@ -2690,3 +2690,10 @@ void rkvm_debug_output(rkvm_vcpu_host *vcpu, const char *s)
 	RKVM_DEBUG_PRINT(vcpu, "%s\n", s);
 }
 EXPORT_SYMBOL_GPL(rkvm_debug_output);
+
+void rkvm_print_ucc(rkvm_vcpu_host *vcpu, u64 value, bool entry)
+{
+	RKVM_DEBUG_PRINT(vcpu, "%s ucc=%lld\n",
+			 entry? "ENTRY" : "EXIT",
+			 (long long)value);
+}

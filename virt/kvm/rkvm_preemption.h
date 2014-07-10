@@ -65,4 +65,6 @@ struct rkvm_vcpu_preemption {
 	bool run_free;
 };
 
+extern void rkvm_print_ucc(rkvm_vcpu_host *vcpu, u64 value, bool entry);
+
 #endif /* __RKVM_PREEMPTION_H */

@@ -111,6 +111,7 @@ void rkvm_preemption_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lop
 	}
 
 	ops->set_ucc(vcpu, vcpu_preemption->entry_ucc);
+	rkvm_print_ucc(vcpu, vcpu_preemption->entry_ucc, true);
 }
 
 void rkvm_preemption_on_vmexit(rkvm_vcpu_host *vcpu, struct rkvm_userspace_data *userspace,
@@ -121,11 +122,14 @@ void rkvm_preemption_on_vmexit(rkvm_vcpu_host *vcpu, struct rkvm_userspace_data 
 	struct rkvm_ops *ops = preemption->ops;
 	struct rkvm_vcpu_preemption *vcpu_preemption = RKVM_VCPU_PREEMPTION(vcpu);
 	bool halted = ops->guest_halted(vcpu);
+	u64 exit_ucc = ops->read_ucc(vcpu);
 
 	u64 accumulate_ucc =
 		vcpu_preemption->accumulate_ucc +
-		ops->read_ucc(vcpu) -
+		exit_ucc -
 		vcpu_preemption->entry_ucc;
+
+	rkvm_print_ucc(vcpu, exit_ucc, false);
 
 	PREEMPTION_LOCKED_WRITE(preemption,
 				vcpu_preemption->accumulate_ucc =
@@ -341,5 +345,6 @@ void rkvm_preemption_run_free(rkvm_vcpu_host *vcpu, bool on, struct rkvm_local_o
 	if (on) {
 		vcpu_preemption->entry_ucc = 0;
 		ops->set_ucc(vcpu, vcpu_preemption->entry_ucc);
+		rkvm_print_ucc(vcpu, vcpu_preemption->entry_ucc, true);
 	}
 }
