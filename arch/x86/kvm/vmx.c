@@ -7658,7 +7658,7 @@ static void prepare_guest_kept_msrs(struct vcpu_vmx *vmx)
 	u64 perf_ctrl_unhalted_core_cycles_event_select = 0x3c;
 	/* Unhalted reference cycles: 1 << 8; */
 	/* Unhalted core cycles: 0 << 8; */
-	u64 perf_ctrl_unhalted_core_cycles_umask = 0 << 8;
+	u64 perf_ctrl_unhalted_core_cycles_umask = 1 << 8;
 
 	bool preempting = rkvm_preempting(vmx->vcpu.kvm);
 	bool recording = rkvm_recording(vmx->vcpu.kvm);
