@@ -102,7 +102,7 @@ void rkvm_preemption_on_vmentry(rkvm_vcpu_host *vcpu, struct rkvm_local_ops *lop
 	if (!vcpu_preemption->run_free) {
 		s64 ucc_delta = ucc_horizon - vcpu_preemption->accumulate_ucc;
 		if (ucc_delta <= 0)
-			vcpu_preemption->entry_ucc = -1;
+			vcpu_preemption->entry_ucc = -1000;
 		else
 			vcpu_preemption->entry_ucc = -ucc_delta;
 		lops->make_apic_deliver_nmi_on_pmi();
