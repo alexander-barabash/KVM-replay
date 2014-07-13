@@ -19,6 +19,12 @@ struct bstream {
 	struct mutex lock;
 	struct bstream_page pages[BSTREAM_MIN_PAGES];
 };
+#ifdef spin_lock
+#undef spin_lock
+#endif
+#ifdef spin_unlock
+#undef spin_unlock
+#endif
 #define spin_lock(...)
 #define spin_unlock(...)
 static inline u32 bstream_page_size(struct bstream *bstream)
