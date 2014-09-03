@@ -325,11 +325,19 @@ bool kvm_pmu_msr(struct kvm_vcpu *vcpu, u32 msr)
 	int ret;
 
 	switch (msr) {
+	case MSR_P6_PERFCTR0 + 3:
+	case MSR_P6_EVNTSEL0 + 3:
+	case MSR_CORE_PERF_FIXED_CTR0:
+	case MSR_CORE_PERF_FIXED_CTR1:
+	case MSR_CORE_PERF_FIXED_CTR2:
+		ret = 0;
+		break;
 	case MSR_CORE_PERF_FIXED_CTR_CTRL:
 	case MSR_CORE_PERF_GLOBAL_STATUS:
 	case MSR_CORE_PERF_GLOBAL_CTRL:
 	case MSR_CORE_PERF_GLOBAL_OVF_CTRL:
 		ret = pmu->version > 1;
+		ret = 0;
 		break;
 	default:
 		ret = get_gp_pmc(pmu, msr, MSR_IA32_PERFCTR0)

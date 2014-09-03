@@ -20,6 +20,7 @@
  */
 
 #include <linux/kvm_host.h>
+#include <linux/rkvm_host.h>
 #include "irq.h"
 #include "mmu.h"
 #include "i8254.h"
@@ -360,6 +361,7 @@ static void kvm_multiple_exception(struct kvm_vcpu *vcpu,
 	prev_nr = vcpu->arch.exception.nr;
 	if (prev_nr == DF_VECTOR) {
 		/* triple fault -> shutdown */
+		printk(KERN_WARNING "DF_VECTOR Triple fault.\n");
 		kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
 		return;
 	}
@@ -2718,6 +2720,9 @@ int kvm_vm_ioctl_check_extension(struct kvm *kvm, long ext)
 	case KVM_CAP_TSC_DEADLINE_TIMER:
 		r = boot_cpu_has(X86_FEATURE_TSC_DEADLINE_TIMER);
 		break;
+	case KVM_CAP_RKVM:
+		r = 1;
+		break;
 	default:
 		r = 0;
 		break;
@@ -2885,6 +2890,7 @@ static int kvm_vcpu_ioctl_interrupt(struct kvm_vcpu *vcpu,
 	if (irqchip_in_kernel(vcpu->kvm))
 		return -ENXIO;
 
+	rkvm_record_irq(vcpu, irq->irq);
 	kvm_queue_interrupt(vcpu, irq->irq, false);
 	kvm_make_request(KVM_REQ_EVENT, vcpu);
 
@@ -2956,6 +2962,7 @@ static int kvm_vcpu_ioctl_x86_set_mce(struct kvm_vcpu *vcpu,
 	if (mce->status & MCI_STATUS_UC) {
 		if ((vcpu->arch.mcg_status & MCG_STATUS_MCIP) ||
 		    !kvm_read_cr4_bits(vcpu, X86_CR4_MCE)) {
+			printk(KERN_WARNING "MCG_STATUS_MCIP Triple fault.\n");
 			kvm_make_request(KVM_REQ_TRIPLE_FAULT, vcpu);
 			return 0;
 		}
@@ -3309,6 +3316,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 		r = -EFAULT;
 		if (copy_from_user(&mce, argp, sizeof mce))
 			goto out;
+		rkvm_on_set_mce(vcpu, &mce, sizeof(mce));
 		r = kvm_vcpu_ioctl_x86_set_mce(vcpu, &mce);
 		break;
 	}
@@ -3330,6 +3338,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 		if (copy_from_user(&events, argp, sizeof(struct kvm_vcpu_events)))
 			break;
 
+		rkvm_on_set_events(vcpu, &events, sizeof(events));
 		r = kvm_vcpu_ioctl_x86_set_vcpu_events(vcpu, &events);
 		break;
 	}
@@ -3353,6 +3362,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 				   sizeof(struct kvm_debugregs)))
 			break;
 
+		rkvm_on_set_dregs(vcpu, &dbgregs, sizeof(dbgregs));
 		r = kvm_vcpu_ioctl_x86_set_debugregs(vcpu, &dbgregs);
 		break;
 	}
@@ -3375,6 +3385,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 		if (IS_ERR(u.xsave))
 			return PTR_ERR(u.xsave);
 
+		rkvm_on_set_xsave(vcpu, u.xsave, sizeof(*u.xsave));
 		r = kvm_vcpu_ioctl_x86_set_xsave(vcpu, u.xsave);
 		break;
 	}
@@ -3398,6 +3409,7 @@ long kvm_arch_vcpu_ioctl(struct file *filp,
 		if (IS_ERR(u.xcrs))
 			return PTR_ERR(u.xcrs);
 
+		rkvm_on_set_xcrs(vcpu, u.xcrs, sizeof(*u.xcrs));
 		r = kvm_vcpu_ioctl_x86_set_xcrs(vcpu, u.xcrs);
 		break;
 	}
@@ -3945,9 +3957,13 @@ long kvm_arch_vm_ioctl(struct file *filp,
 		r = 0;
 		break;
 	}
-
-	default:
-		;
+	
+	default: {
+		bool handled;
+		long rkvm_result = rkvm_arch_vm_ioctl(kvm, ioctl, arg, &handled);
+		if (handled)
+			return rkvm_result;
+	}
 	}
 out:
 	return r;
@@ -4340,6 +4356,7 @@ mmio:
 	/*
 	 * Is this MMIO handled locally?
 	 */
+	/* TODO: rkvm */
 	handled = ops->read_write_mmio(vcpu, gpa, bytes, val);
 	if (handled == bytes)
 		return X86EMUL_CONTINUE;
@@ -4554,7 +4571,8 @@ static int emulator_pio_in_emulated(struct x86_emulate_ctxt *ctxt,
 	ret = emulator_pio_in_out(vcpu, size, port, val, count, true);
 	if (ret) {
 data_avail:
-		memcpy(val, vcpu->arch.pio_data, size * count);
+		if (rkvm_on_pio_in_data_avail(vcpu, val, vcpu->arch.pio_data, size * count))
+			memcpy(val, vcpu->arch.pio_data, size * count);
 		trace_kvm_pio(KVM_PIO_IN, port, size, count, vcpu->arch.pio_data);
 		vcpu->arch.pio.count = 0;
 		return 1;
@@ -6195,6 +6213,12 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 		kvm_lapic_sync_from_vapic(vcpu);
 
 	r = kvm_x86_ops->handle_exit(vcpu);
+	rkvm_on_update_vmexit_state(vcpu);
+
+	if ((r > 0) && rkvm_must_exit(vcpu)) {
+		r = 0;
+		vcpu->run->exit_reason = KVM_EXIT_RKVM;
+	}
 	return r;
 
 cancel_injection:
@@ -6202,6 +6226,11 @@ cancel_injection:
 	if (unlikely(vcpu->arch.apic_attention))
 		kvm_lapic_sync_from_vapic(vcpu);
 out:
+
+	if ((r > 0) && rkvm_must_exit(vcpu)) {
+		r = 0;
+		vcpu->run->exit_reason = KVM_EXIT_RKVM;
+	}
 	return r;
 }
 
@@ -6213,12 +6242,20 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 
 	vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
 
+	if (!rkvm_on_vcpu_entry(vcpu)) {
+		vcpu->run->exit_reason = KVM_EXIT_RKVM;
+		srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
+		return 0;
+	}
+
 	r = 1;
 	while (r > 0) {
 		if (vcpu->arch.mp_state == KVM_MP_STATE_RUNNABLE &&
-		    !vcpu->arch.apf.halted)
+		    !vcpu->arch.apf.halted) {
 			r = vcpu_enter_guest(vcpu);
-		else {
+		} else {
+			rkvm_vcpu_halted(vcpu);
+			rkvm_on_vcpu_exit(vcpu, true);
 			srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 			kvm_vcpu_block(vcpu);
 			vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
@@ -6238,6 +6275,11 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 					r = -EINTR;
 					break;
 				}
+			}
+			if ((r > 0) && !rkvm_on_vcpu_entry(vcpu)) {
+				r = 0;
+				vcpu->run->exit_reason = KVM_EXIT_RKVM;
+				break;
 			}
 		}
 
@@ -6261,13 +6303,20 @@ static int __vcpu_run(struct kvm_vcpu *vcpu)
 			vcpu->run->exit_reason = KVM_EXIT_INTR;
 			++vcpu->stat.signal_exits;
 		}
-		if (need_resched()) {
+		if (need_resched() && rkvm_can_reschedule(vcpu)) {
+			rkvm_on_vcpu_exit(vcpu, true);
 			srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 			cond_resched();
 			vcpu->srcu_idx = srcu_read_lock(&kvm->srcu);
+			if ((r > 0) && !rkvm_on_vcpu_entry(vcpu)) {
+				r = 0;
+				vcpu->run->exit_reason = KVM_EXIT_RKVM;
+				break;
+			}
 		}
 	}
 
+	rkvm_on_vcpu_exit(vcpu, false);
 	srcu_read_unlock(&kvm->srcu, vcpu->srcu_idx);
 
 	return r;
@@ -7107,6 +7156,10 @@ int kvm_arch_vcpu_init(struct kvm_vcpu *vcpu)
 	if (r)
 		goto fail_free_wbinvd_dirty_mask;
 
+	r = rkvm_vcpu_init(vcpu);
+	if (r)
+		goto fail_free_fx;
+
 	vcpu->arch.ia32_tsc_adjust_msr = 0x0;
 	vcpu->arch.pv_time_enabled = false;
 
@@ -7117,6 +7170,8 @@ int kvm_arch_vcpu_init(struct kvm_vcpu *vcpu)
 	kvm_pmu_init(vcpu);
 
 	return 0;
+fail_free_fx:
+	fx_free(vcpu);
 fail_free_wbinvd_dirty_mask:
 	free_cpumask_var(vcpu->arch.wbinvd_dirty_mask);
 fail_free_mce_banks:
@@ -7135,6 +7190,7 @@ void kvm_arch_vcpu_uninit(struct kvm_vcpu *vcpu)
 {
 	int idx;
 
+	rkvm_vcpu_uninit(vcpu);
 	kvm_pmu_destroy(vcpu);
 	kfree(vcpu->arch.mce_banks);
 	kvm_free_lapic(vcpu);
@@ -7148,8 +7204,13 @@ void kvm_arch_vcpu_uninit(struct kvm_vcpu *vcpu)
 
 int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 {
+	int r;
 	if (type)
 		return -EINVAL;
+
+	r = rkvm_init(kvm, kvm_x86_ops->rkvm_ops);
+	if (r < 0)
+		return r;
 
 	INIT_LIST_HEAD(&kvm->arch.active_mmu_pages);
 	INIT_LIST_HEAD(&kvm->arch.zapped_obsolete_pages);
@@ -7233,6 +7294,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
 		mem.slot = TSS_PRIVATE_MEMSLOT;
 		kvm_set_memory_region(kvm, &mem);
 	}
+	rkvm_destroy(kvm);
 	kvm_iommu_unmap_guest(kvm);
 	kfree(kvm->arch.vpic);
 	kfree(kvm->arch.vioapic);
@@ -7629,6 +7691,12 @@ bool kvm_arch_has_noncoherent_dma(struct kvm *kvm)
 	return atomic_read(&kvm->arch.noncoherent_dma_count);
 }
 EXPORT_SYMBOL_GPL(kvm_arch_has_noncoherent_dma);
+
+void kvm_arch_on_preemption(struct kvm_vcpu *vcpu)
+{
+	if(kvm_x86_ops->on_preemption)
+		kvm_x86_ops->on_preemption(vcpu);
+}
 
 EXPORT_TRACEPOINT_SYMBOL_GPL(kvm_exit);
 EXPORT_TRACEPOINT_SYMBOL_GPL(kvm_inj_virq);

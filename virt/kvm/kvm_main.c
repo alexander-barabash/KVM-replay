@@ -49,6 +49,7 @@
 #include <linux/slab.h>
 #include <linux/sort.h>
 #include <linux/bsearch.h>
+#include <linux/bstream_ops.h>
 
 #include <asm/processor.h>
 #include <asm/io.h>
@@ -607,6 +608,7 @@ static void kvm_destroy_vm(struct kvm *kvm)
 #else
 	kvm_arch_flush_shadow_all(kvm);
 #endif
+	/* RKVM: free the preemption data. */
 	kvm_arch_destroy_vm(kvm);
 	kvm_destroy_devices(kvm);
 	kvm_free_physmem(kvm);
@@ -2023,6 +2025,7 @@ out_free1:
 			r = PTR_ERR(kvm_regs);
 			goto out;
 		}
+		rkvm_on_set_regs(vcpu, kvm_regs, sizeof(*kvm_regs));
 		r = kvm_arch_vcpu_ioctl_set_regs(vcpu, kvm_regs);
 		kfree(kvm_regs);
 		break;
@@ -2048,6 +2051,7 @@ out_free1:
 			kvm_sregs = NULL;
 			goto out;
 		}
+		rkvm_on_set_sregs(vcpu, kvm_sregs, sizeof(*kvm_sregs));
 		r = kvm_arch_vcpu_ioctl_set_sregs(vcpu, kvm_sregs);
 		break;
 	}
@@ -2143,8 +2147,15 @@ out_free1:
 		r = kvm_arch_vcpu_ioctl_set_fpu(vcpu, fpu);
 		break;
 	}
-	default:
+	default: {
+		bool handled;
+		long rkvm_result = rkvm_vcpu_ioctl(vcpu, ioctl, arg, &handled);
+		if (handled) {
+			r = (int)rkvm_result;
+			break;
+		}
 		r = kvm_arch_vcpu_ioctl(filp, ioctl, arg);
+	}
 	}
 out:
 	vcpu_put(vcpu);
@@ -2449,6 +2460,12 @@ static long kvm_vm_ioctl(struct file *filp,
 	case KVM_IRQ_LINE_STATUS:
 	case KVM_IRQ_LINE: {
 		struct kvm_irq_level irq_event;
+
+		if (rkvm_replaying(kvm)) {
+			/* Interrupts from devices are not accepted during replay. */
+			r = 0;
+			break;
+		}
 
 		r = -EFAULT;
 		if (copy_from_user(&irq_event, argp, sizeof irq_event))
@@ -3133,6 +3150,7 @@ static void kvm_sched_out(struct preempt_notifier *pn,
 
 	if (current->state == TASK_RUNNING)
 		vcpu->preempted = true;
+	kvm_arch_on_preemption(vcpu);
 	kvm_arch_vcpu_put(vcpu);
 }
 
@@ -3196,6 +3214,7 @@ int kvm_init(void *opaque, unsigned vcpu_size, unsigned vcpu_align,
 	kvm_chardev_ops.owner = module;
 	kvm_vm_fops.owner = module;
 	kvm_vcpu_fops.owner = module;
+	register_bstream_file_ops(module);
 
 	r = misc_register(&kvm_dev);
 	if (r) {

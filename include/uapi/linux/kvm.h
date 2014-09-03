@@ -10,6 +10,7 @@
 #include <linux/types.h>
 #include <linux/compiler.h>
 #include <linux/ioctl.h>
+#include <linux/rkvm.h>
 #include <asm/kvm.h>
 
 #define KVM_API_VERSION 12
@@ -172,6 +173,7 @@ struct kvm_pit_config {
 #define KVM_EXIT_S390_TSCH        22
 #define KVM_EXIT_EPR              23
 #define KVM_EXIT_SYSTEM_EVENT     24
+#define KVM_EXIT_RKVM	          25
 
 /* For KVM_EXIT_INTERNAL_ERROR */
 /* Emulate instruction failed. */
@@ -235,6 +237,7 @@ struct kvm_run {
 			__u8  data[8];
 			__u32 len;
 			__u8  is_write;
+			__u8  is_internal;
 		} mmio;
 		/* KVM_EXIT_HYPERCALL */
 		struct {
@@ -326,6 +329,8 @@ struct kvm_run {
 		struct kvm_sync_regs regs;
 		char padding[1024];
 	} s;
+
+	struct rkvm_vcpu_debug_data rkvm_vcpu_debug_data;
 };
 
 /* for KVM_REGISTER_COALESCED_MMIO / KVM_UNREGISTER_COALESCED_MMIO */
@@ -765,6 +770,7 @@ struct kvm_ppc_smmu_info {
 #define KVM_CAP_PPC_FIXUP_HCALL 103
 #define KVM_CAP_PPC_ENABLE_HCALL 104
 #define KVM_CAP_CHECK_EXTENSION_VM 105
+#define KVM_CAP_RKVM 106
 
 #ifdef KVM_CAP_IRQ_ROUTING
 
@@ -1131,6 +1137,21 @@ struct kvm_s390_ucas_mapping {
 #define KVM_ARM_VCPU_INIT	  _IOW(KVMIO,  0xae, struct kvm_vcpu_init)
 #define KVM_ARM_PREFERRED_TARGET  _IOR(KVMIO,  0xaf, struct kvm_vcpu_init)
 #define KVM_GET_REG_LIST	  _IOWR(KVMIO, 0xb0, struct kvm_reg_list)
+
+/* Available with KVM_CAP_RKVM */
+#define RKVM_SET_QUANTUM	        _IOW(KVMIO, 0xc0, __u64)
+#define RKVM_GET_QUANTUM	        _IOR(KVMIO, 0xc1, __u64)
+#define RKVM_SET_EXECUTION_FLAG		_IOW(KVMIO, 0xc2, __u32)
+#define RKVM_CLEAR_EXECUTION_FLAG	_IOW(KVMIO, 0xc3, __u32)
+#define RKVM_GET_EXECUTION_MODE		_IOR(KVMIO, 0xc4, __u32)
+#define RKVM_USERSPACE_ENTRY	        _IOW(KVMIO, 0xc5, struct rkvm_userspace_data)
+#define RKVM_USERSPACE_EXIT	        _IOW(KVMIO, 0xc6, struct rkvm_userspace_data)
+#define RKVM_OPEN_RECORD_STREAMS	_IOR(KVMIO, 0xca, struct rkvm_stream_fds)
+#define RKVM_OPEN_REPLAY_STREAMS	_IOR(KVMIO, 0xcb, struct rkvm_stream_fds)
+#define RKVM_OPEN_DEBUG_STREAM	         _IO(KVMIO, 0xcc)
+#define RKVM_XFER	                _IOW(KVMIO, 0xcd, struct rkvm_xfer)
+#define RKVM_FLUSH_COALESCED            _IOW(KVMIO, 0xce, __u32)
+
 
 #define KVM_DEV_ASSIGN_ENABLE_IOMMU	(1 << 0)
 #define KVM_DEV_ASSIGN_PCI_2_3		(1 << 1)

@@ -21,6 +21,7 @@
 #include <linux/kvm.h>
 #include <linux/kvm_para.h>
 #include <linux/kvm_types.h>
+#include <linux/rkvm_host.h>
 #include <linux/perf_event.h>
 #include <linux/pvclock_gtod.h>
 #include <linux/clocksource.h>
@@ -772,6 +773,9 @@ struct kvm_x86_ops {
 	bool (*mpx_supported)(void);
 
 	int (*check_nested_events)(struct kvm_vcpu *vcpu, bool external_intr);
+
+	void (*on_preemption)(struct kvm_vcpu *vcpu);
+	struct rkvm_ops *rkvm_ops;
 };
 
 struct kvm_arch_async_pf {
@@ -847,7 +851,12 @@ int x86_emulate_instruction(struct kvm_vcpu *vcpu, unsigned long cr2,
 static inline int emulate_instruction(struct kvm_vcpu *vcpu,
 			int emulation_type)
 {
-	return x86_emulate_instruction(vcpu, 0, emulation_type, NULL, 0);
+	int r = x86_emulate_instruction(vcpu, 0, emulation_type, NULL, 0);
+	if (r == EMULATE_DONE) {
+		if (rkvm_vcpu_recording_or_replaying(vcpu))
+			rkvm_debug_output(vcpu, "emulate_instruction");
+	}
+	return r;
 }
 
 void kvm_enable_efer_bits(u64);
